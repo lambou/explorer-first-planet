@@ -66,6 +66,14 @@ func _process(_delta: float) -> void:
 	var reach := _sweep(pivot, back, dist, exclude)
 	reach = minf(reach, _density_reach(pivot, back, reach))
 	var pos := pivot + back * reach
+	# Last guard: the camera AND the corners of its near plane must be in open air with a margin (a corner poking into a wall
+	# shows the underground behind it). If not, the camera is pulled toward the ball until they are.
+	if world != null:
+		var tries := 0
+		while tries < 14 and reach > 0.05 and _near_plane_blocked(pos, pivot, up):
+			reach *= 0.86
+			pos = pivot + back * reach
+			tries += 1
 	if reach < 0.3:
 		# ball pressed against a wall: look along the ball's heading from right next to it
 		global_transform = Transform3D(Basis.looking_at(fwd, up), pos)
@@ -75,6 +83,19 @@ func _process(_delta: float) -> void:
 	# the ball would fill the screen when the camera is this close
 	if target is Node3D:
 		(target as Node3D).visible = reach > 0.8
+
+## Is the camera, or a corner of its near plane, inside the ground or within CLEARANCE of it?
+const CLEARANCE := 0.25
+func _near_plane_blocked(pos: Vector3, pivot: Vector3, up: Vector3) -> bool:
+	var dir := (pivot - pos)
+	if dir.length() < 0.001:
+		return false
+	var cb := Basis.looking_at(dir.normalized(), up)
+	var ahead := -cb.z * maxf(near, 0.3)
+	for off: Vector3 in [Vector3.ZERO, cb.x * 0.45, -cb.x * 0.45, cb.y * 0.3, -cb.y * 0.3, ahead, ahead + cb.x * 0.45, ahead - cb.x * 0.45]:
+		if world.density_at(pos + off) > -CLEARANCE:
+			return true
+	return false
 
 func _back(up: Vector3, pt: float) -> Vector3:
 	return -fwd * cos(pt) + up * sin(pt)

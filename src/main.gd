@@ -229,6 +229,12 @@ func _process(delta: float) -> void:
 	elif player.freeze and world.is_area_ready(player.global_position):
 		player.freeze = false
 	if _repro.has("shot") and _frame == int(_repro.get("shotframe", 360)):          # --shot=file.png works with or without --pos
+		# debugging aid: is the camera (or a corner of its near plane) inside solid ground? It never should be.
+		var cb := cam.global_transform.basis
+		var worst := -9.0
+		for off in [Vector3.ZERO, cb.x * 0.35, -cb.x * 0.35, cb.y * 0.25, -cb.y * 0.25, -cb.z * 0.3]:
+			worst = maxf(worst, world.density_at(cam.global_position + off + (-cb.z) * cam.near))
+		print("CAMERA density (worst of centre and near-plane corners): %.2f  %s   ball %.1f m above ground" % [worst, "INSIDE GROUND" if worst > 0.0 else "ok", player.global_position.length() - R - _col.height])
 		get_viewport().get_texture().get_image().save_png(String(_repro.shot))
 		get_tree().quit()
 

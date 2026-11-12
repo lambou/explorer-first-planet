@@ -1,47 +1,73 @@
 class_name ToolAim
 extends Node3D
 ## The mouse-aimed tool. The cursor is free; a ray from the camera through it finds what the tool will hit: a rock
-## (nearest wins) or the ground. A ring lying on that surface shows where and how big the blow is: white inside the
-## player's reach, red outside it (the tool does nothing there). Display + picking only: it never changes the world.
+## (nearest wins) or the ground. A PATCH that follows the surface shows where and how big the blow is: a translucent
+## area with a bright outline, every point of it dropped onto the real surface (the terrain for the ground, the rock's
+## own bitten surface for a rock), so it covers the targeted shape and never sinks into the floor or floats over it.
+## White inside the player's reach, red outside it (the tool does nothing there). Display + picking only.
 
 const REACH := 4.5                 # metres from the ball: the arm's length; nothing farther can be altered
 const GROUND_RADIUS := 2.4         # what one dig removes (same as VoxelWorld.carve in main)
 const MAX_RAY := 70.0
+const SEGS := 28                   # points around the patch
+const RINGS := [0.5, 0.9, 1.0]     # radii of the point rings (fractions of the patch radius): fill, outline inner edge, outline outer edge
 
-var _ring: MeshInstance3D
+var _mi: MeshInstance3D
+var _imm := ImmediateMesh.new()
 var _dot: MeshInstance3D
-var _mat: StandardMaterial3D
+var _fill: ShaderMaterial
+var _line: ShaderMaterial
+var _key := ""
 var reach := REACH                 # debugging aid: main can widen it for screenshots (--reach=)
 var target := {"kind": "none"}
 
 func _init() -> void:
-	_mat = StandardMaterial3D.new()
-	_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-	_mat.albedo_color = Color(1, 1, 1, 0.9)
-	_mat.cull_mode = BaseMaterial3D.CULL_DISABLED
-	_mat.render_priority = 2
-	var tm := TorusMesh.new()
-	tm.inner_radius = 0.93
-	tm.outer_radius = 1.0
-	tm.rings = 32
-	tm.ring_segments = 4
-	_ring = MeshInstance3D.new()
-	_ring.mesh = tm
-	_ring.material_override = _mat
-	_ring.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-	add_child(_ring)
+	_fill = _material(0.20)
+	_line = _material(0.95)
+	_mi = MeshInstance3D.new()
+	_mi.mesh = _imm
+	_mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	add_child(_mi)
 	var sm := SphereMesh.new()
-	sm.radius = 0.06
-	sm.height = 0.12
+	sm.radius = 0.05
+	sm.height = 0.10
 	sm.radial_segments = 8
 	sm.rings = 4
 	_dot = MeshInstance3D.new()
 	_dot.mesh = sm
-	_dot.material_override = _mat
+	_dot.material_override = _line
 	_dot.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	add_child(_dot)
 	visible = false
+
+## The look of the patch: a flat colour that is pulled toward the camera when drawn (a depth bias, `bias` metres), so
+## the patch always wins the depth test against the surface under it (the mesh of the terrain is only an approximation of
+## the density surface the patch was placed on, and can lie above it) while anything really in front still hides it.
+## No depth writes, so it never hides anything itself. Cost: nothing but one extra vertex step.
+const SHADER := """
+shader_type spatial;
+render_mode unshaded, cull_disabled, depth_draw_never;
+uniform vec4 col : source_color = vec4(1.0);
+uniform float bias = 0.45;
+void vertex() {
+	vec3 v = (MODELVIEW_MATRIX * vec4(VERTEX, 1.0)).xyz;
+	v += normalize(-v) * bias;
+	POSITION = PROJECTION_MATRIX * vec4(v, 1.0);
+}
+void fragment() {
+	ALBEDO = col.rgb;
+	ALPHA = col.a;
+}
+"""
+
+static func _material(alpha: float) -> ShaderMaterial:
+	var sh := Shader.new()
+	sh.code = SHADER
+	var m := ShaderMaterial.new()
+	m.shader = sh
+	m.render_priority = 2
+	m.set_shader_parameter("col", Color(1, 1, 1, alpha))
+	return m
 
 ## What is under the mouse. `mouse` in viewport pixels. Returns
 ## {kind: "rock" | "ground" | "none", point, normal, in_reach, radius, rock?, chunk?, t}.
@@ -69,25 +95,117 @@ func pick(cam: Camera3D, world: VoxelWorld, player_pos: Vector3, mouse: Vector2)
 		t = {"kind": "ground", "point": p, "normal": n, "t": gt, "radius": GROUND_RADIUS * 0.9,
 			"in_reach": player_pos.distance_to(p) <= reach}
 	target = t
-	_show(t)
+	_show(world, t)
 	return t
 
-func _show(t: Dictionary) -> void:
+func _show(world: VoxelWorld, t: Dictionary) -> void:
 	if t.kind == "none":
 		visible = false
 		return
 	visible = true
+	global_transform = Transform3D(Basis.IDENTITY, t.point)
+	var col := Color(1.0, 1.0, 1.0)
+	if not t.in_reach:
+		col = Color(1.0, 0.25, 0.2)
+	elif t.kind == "rock":
+		col = Color(1.0, 0.85, 0.3)
+	_fill.set_shader_parameter("col", Color(col.r, col.g, col.b, 0.20))
+	_line.set_shader_parameter("col", Color(col.r, col.g, col.b, 0.95))
+	# the patch only changes when the target moves, the ground is edited or the rock is hit
+	var pt: Vector3 = t.point
+	var key := "%s|%d|%.2f,%.2f,%.2f|%.2f" % [t.kind, world.edit_rev, pt.x, pt.y, pt.z, t.rock.hits if t.kind == "rock" else 0.0]
+	if key != _key:
+		_key = key
+		_build_patch(world, t)
+
+## Build the patch: rings of points around the target, each dropped onto the surface, then triangles between them.
+func _build_patch(world: VoxelWorld, t: Dictionary) -> void:
 	var n: Vector3 = t.normal
+	var centre: Vector3 = t.point
 	var ref := Vector3.RIGHT if absf(n.x) < 0.9 else Vector3.FORWARD
-	var x := n.cross(ref).normalized()
-	var z := x.cross(n)
+	var tx := n.cross(ref).normalized()
+	var tz := tx.cross(n)
 	var rad: float = t.radius
-	global_transform = Transform3D(Basis(x * rad, n * rad, z * rad), t.point + n * 0.05)
-	_dot.scale = Vector3.ONE / maxf(rad, 0.1)           # the dot keeps its own size whatever the ring's
-	var col := Color(1.0, 1.0, 1.0, 0.9) if t.in_reach else Color(1.0, 0.25, 0.2, 0.75)
-	if t.kind == "rock" and t.in_reach:
-		col = Color(1.0, 0.85, 0.3, 0.95)
-	_mat.albedo_color = col
+	var is_rock: bool = t.kind == "rock"
+	var rock: RockInst = t.rock if is_rock else null
+	var frame := RockMesher.frame_of(rock) if is_rock else {}
+	var rings: Array = []                       # per ring: PackedVector3Array (local to the target; INF = no surface there)
+	for k in RINGS.size():
+		var ring := PackedVector3Array()
+		for i in SEGS:
+			var a := TAU * i / SEGS
+			var p0 := centre + (tx * cos(a) + tz * sin(a)) * rad * float(RINGS[k])
+			ring.append(_on_surface(world, p0, n, rock, frame, centre))
+		rings.append(ring)
+	_imm.clear_surfaces()
+	# translucent area: a fan from the centre to the first ring, then the band to the second
+	var fill := PackedVector3Array()
+	var c0 := n * 0.04
+	for i in SEGS:
+		var j := (i + 1) % SEGS
+		_tri(fill, c0, rings[0][i], rings[0][j])
+		_quad(fill, rings[0][i], rings[0][j], rings[1][j], rings[1][i])
+	# bright outline: the band between the last two rings
+	var line := PackedVector3Array()
+	for i in SEGS:
+		var j := (i + 1) % SEGS
+		_quad(line, rings[1][i], rings[1][j], rings[2][j], rings[2][i])
+	_draw(fill, _fill)
+	_draw(line, _line)
+
+func _draw(verts: PackedVector3Array, mat: Material) -> void:
+	if verts.is_empty():
+		return
+	_imm.surface_begin(Mesh.PRIMITIVE_TRIANGLES, mat)
+	for v in verts:
+		_imm.surface_add_vertex(v)
+	_imm.surface_end()
+
+func _tri(out: PackedVector3Array, a: Vector3, b: Vector3, c: Vector3) -> void:
+	if a == Vector3.INF or b == Vector3.INF or c == Vector3.INF:
+		return
+	out.append(a)
+	out.append(b)
+	out.append(c)
+
+func _quad(out: PackedVector3Array, a: Vector3, b: Vector3, c: Vector3, d: Vector3) -> void:
+	_tri(out, a, b, c)
+	_tri(out, a, c, d)
+
+## The point of the surface below / above `p0` (along the target's normal), as a position local to the target and lifted a
+## little off the surface so it does not flicker against it. Vector3.INF where there is no surface to be found.
+func _on_surface(world: VoxelWorld, p0: Vector3, n: Vector3, rock: RockInst, frame: Dictionary, centre: Vector3) -> Vector3:
+	if rock != null:
+		# a rock is star-shaped around its centre: along the direction from the centre the surface is one lookup
+		var w := (p0 - rock.pos).normalized()
+		var wl := Vector3(w.dot(frame.x), w.dot(frame.y), w.dot(frame.z))
+		var l := RockMesher.surface_radius(rock, frame, wl)
+		return rock.pos + w * (l + 0.03) - centre
+	var step := 0.3
+	var s := 0.0
+	if world.density_at(p0) > 0.0:
+		# inside the ground: climb out along the normal
+		for i in 9:
+			if world.density_at(p0 + n * (s + step)) <= 0.0:
+				return p0 + n * (_bisect(world, p0, n, s, s + step) + 0.05) - centre
+			s += step
+	else:
+		# in the air: sink along the normal until the ground
+		for i in 9:
+			if world.density_at(p0 - n * (s + step)) > 0.0:
+				return p0 + n * (_bisect(world, p0, n, -s - step, -s) + 0.05) - centre
+			s += step
+	return Vector3.INF
+
+## Where along the normal the density crosses zero; `s_solid` is solid, `s_air` is air.
+func _bisect(world: VoxelWorld, p0: Vector3, n: Vector3, s_solid: float, s_air: float) -> float:
+	for i in 4:
+		var mid := (s_solid + s_air) * 0.5
+		if world.density_at(p0 + n * mid) > 0.0:
+			s_solid = mid
+		else:
+			s_air = mid
+	return (s_solid + s_air) * 0.5
 
 ## One line for the panel about what is under the tool.
 func describe(world: VoxelWorld) -> String:
