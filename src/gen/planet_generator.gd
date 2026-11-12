@@ -515,9 +515,49 @@ func find_cave_spawn(from_dir: Vector3 = Vector3.ZERO, open_sky: bool = false) -
 				while k <= 12 and _cave_air(p - d * float(k), scratch):
 					k += 1
 				if k <= 12:
-					return p - d * (float(k) - 0.5) + d * 1.5
+					var spot := p - d * (float(k) - 0.5) + d * 1.5
+					# the world is built on a coarse 4 m lattice: a narrow shaft can fall between its nodes. Only a spot that is
+					# also free in the DATA THE WORLD USES is a valid spawn.
+					if _free_in_world(spot, d):
+						return spot
 			depth += 3.0
 	return Vector3.ZERO
+
+## Is the ball's place free (air all around it, solid ground below) in the chunk density the world really builds?
+func _free_in_world(p: Vector3, up: Vector3) -> bool:
+	var c := Vector3i(floori(p.x / S), floori(p.y / S), floori(p.z / S))
+	var f := fill_chunk(c, Column.new(), 0, true)
+	var dens: PackedFloat32Array = f.dens
+	var o := Vector3(c * S)
+	var t1 := up.cross(Vector3.UP if absf(up.y) < 0.95 else Vector3.RIGHT).normalized()
+	var t2 := up.cross(t1)
+	for off: Vector3 in [Vector3.ZERO, up * 0.8, t1 * 0.8, -t1 * 0.8, t2 * 0.8, -t2 * 0.8]:
+		var q := p + off
+		var lc := Vector3i(floori(q.x / S), floori(q.y / S), floori(q.z / S))
+		if lc != c:
+			continue                                  # the probe lies in the next chunk: skip it (the rest decide)
+		if _lat_sample(dens, q - o) > -0.3:
+			return false
+	var below := p - up * 1.6
+	if Vector3i(floori(below.x / S), floori(below.y / S), floori(below.z / S)) == c and _lat_sample(dens, below - o) < 0.0:
+		return false                                   # no floor under the ball (it would drop)
+	return true
+
+## Trilinear sample of a chunk's padded density at a local position.
+static func _lat_sample(dens: PackedFloat32Array, lp: Vector3) -> float:
+	var P2 := WorldConfig.PADDED
+	var x := clampf(lp.x, -0.999, S - 0.001)
+	var y := clampf(lp.y, -0.999, S - 0.001)
+	var z := clampf(lp.z, -0.999, S - 0.001)
+	var ix := floori(x)
+	var iy := floori(y)
+	var iz := floori(z)
+	var fx := x - ix
+	var fy := y - iy
+	var fz := z - iz
+	var b := (ix + 1) + P2 * ((iy + 1) + P2 * (iz + 1))
+	return lerpf(lerpf(lerpf(dens[b], dens[b + 1], fx), lerpf(dens[b + P2], dens[b + P2 + 1], fx), fy),
+		lerpf(lerpf(dens[b + P2 * P2], dens[b + P2 * P2 + 1], fx), lerpf(dens[b + P2 * P2 + P2], dens[b + P2 * P2 + P2 + 1], fx), fy), fz)
 
 func _cave_air(p: Vector3, scratch: Column) -> bool:
 	return density_at(roundi(p.x), roundi(p.y), roundi(p.z), scratch, 1, true) < 0.0

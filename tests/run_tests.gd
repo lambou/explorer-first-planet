@@ -1413,6 +1413,28 @@ func _cave_spawn_tests() -> void:
 				open = false
 			hh += 2.0
 		check(open, "the open cave really has a free shaft up to the sky")
+	# a spawn must be free in the world AS BUILT (its 4 m lattice can lose a narrow shaft the exact generator has)
+	var wv := VoxelWorld.new()
+	wv.setup(g)
+	var all_free := true
+	var kinds := {"closed": sp, "open to the sky": lit}
+	for kind in kinds:
+		var spot: Vector3 = kinds[kind]
+		if spot == Vector3.ZERO:
+			continue
+		var scc := VoxelWorld.world_to_chunk(spot)
+		for dz in range(-1, 2):
+			for dy in range(-1, 2):
+				for dx in range(-1, 2):
+					wv._ensure_chunk(scc + Vector3i(dx, dy, dz))
+		var upv := spot.normalized()
+		var air := wv.density_at(spot)
+		var floor_d := wv.density_at(spot - upv * 1.6)
+		print("  %s cave spawn in the built world: density at the ball %.2f, 1.6 m below %.2f" % [kind, air, floor_d])
+		if air > -0.5 or floor_d < 0.0:
+			all_free = false
+	check(all_free, "a cave spawn is free air with floor under it in the world as built (never inside rock)")
+	wv.free()
 	# nearest-first: asking from the spawn's own place gives the same cave back
 	var near := g.find_cave_spawn(d)
 	check(near.distance_to(sp) < 400.0, "searching from a cave finds one close by")

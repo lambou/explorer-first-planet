@@ -47,7 +47,7 @@ func _physics_process(_delta: float) -> void:
 	if freeze:
 		return
 	var up := global_position.normalized()
-	var fwd := cam.fwd if cam else Vector3.FORWARD
+	var fwd: Vector3 = cam.view_fwd if cam else Vector3.FORWARD     # the top of the screen, even when the camera swung round
 	var right := fwd.cross(up)
 	var kx := _axis(KEY_D, KEY_A)
 	var kz := _axis(KEY_W, KEY_S)

@@ -34,6 +34,8 @@ var _far_hidden := false
 var _col := Column.new()
 var _repro := {}          # launch options that reproduce a captured view (see _apply_repro)
 var _frame := 0
+var _sweep: Array = []          # camera sweep (--sweep): the views to try
+var _sweep_res: Array = []
 
 func _ready() -> void:
 	for a in OS.get_cmdline_user_args():
@@ -130,7 +132,7 @@ func _heading_deg() -> float:
 	var up := player.global_position.normalized()
 	var north := (Vector3.UP - up * Vector3.UP.dot(up)).normalized()
 	var east := Vector3.UP.cross(up).normalized()
-	return fposmod(rad_to_deg(atan2(cam.fwd.dot(east), cam.fwd.dot(north))), 360.0)
+	return fposmod(rad_to_deg(atan2(cam.view_fwd.dot(east), cam.view_fwd.dot(north))), 360.0)
 
 func _setup_environment() -> void:
 	env = Environment.new()
@@ -186,7 +188,7 @@ func _process(delta: float) -> void:
 	world.update_center(player.global_position)
 	far.update_center(player.global_position)
 	world.set_view(cam.global_position, -cam.global_transform.basis.z)
-	hud.radar.set_view(player.global_position, cam.fwd, _sun_dir())
+	hud.radar.set_view(player.global_position, cam.view_fwd, _sun_dir())
 	var target_hole := world.covered_radius()
 	_hole = target_hole if target_hole < _hole else lerpf(_hole, target_hole, 0.3)
 	far.set_hole(player.global_position, _hole)
@@ -228,6 +230,21 @@ func _process(delta: float) -> void:
 			_debug_hit(int(_repro.hit))
 	elif player.freeze and world.is_area_ready(player.global_position):
 		player.freeze = false
+	if _repro.has("tunnel") and _frame == 302:
+		# debugging aid (--tunnel=LENGTH,DEPTH): a tunnel along the heading, DEPTH metres under the player
+		var tv := String(_repro.tunnel).split_floats(",")
+		var upt := player.global_position.normalized()
+		var fwt := (cam.fwd - upt * cam.fwd.dot(upt)).normalized()
+		var base := player.global_position - upt * tv[1]
+		var m := 0.0
+		while m <= tv[0]:
+			world.carve(base + fwt * m, 2.3)
+			m += 1.6
+	if _repro.has("below") and _frame == 325:
+		var upb := player.global_position.normalized()
+		player.global_position -= upb * float(_repro.below)       # into the pit / shaft / tunnel that was dug
+	if _repro.has("sweep") and _frame >= 340:
+		_sweep_step()
 	if _repro.has("shot") and _frame == int(_repro.get("shotframe", 360)):          # --shot=file.png works with or without --pos
 		# debugging aid: is the camera (or a corner of its near plane) inside solid ground? It never should be.
 		var cb := cam.global_transform.basis
@@ -350,6 +367,110 @@ func _cave_spawn_from(from_dir: Vector3, lit: bool) -> Vector3:
 	if closed == Vector3.ZERO:
 		return open_cave
 	return open_cave if open_cave.angle_to(from_dir) <= closed.angle_to(from_dir) else closed
+
+## Debugging aid (--sweep): after the digs, try many camera headings / pitches / distances around the player and
+## measure each view: is the camera (or a corner of its near plane) inside the ground or touching it, and does solid ground
+## lie between the camera and the ball? Prints a summary and the worst views, then quits.
+func _sweep_step() -> void:
+	const SETTLE := 9
+	if _sweep.is_empty() and _sweep_res.is_empty():
+		for h in [0.0, 60.0, 120.0, 180.0, 240.0, 300.0]:
+			for pt in [-10.0, 5.0, 25.0, 55.0, 80.0]:
+				for d in [4.0, 10.0, 22.0]:
+					_sweep.append(Vector3(h, pt, d))
+		_sweep_res.append("started")
+	var k := (_frame - 340) / SETTLE
+	var phase := (_frame - 340) % SETTLE
+	if k >= _sweep.size():
+		_sweep_report()
+		return
+	var v: Vector3 = _sweep[k]
+	if phase == 0:
+		var up := player.global_position.normalized()
+		var north := (Vector3.UP - up * Vector3.UP.dot(up)).normalized()
+		var east := Vector3.UP.cross(up).normalized()
+		cam.fwd = north * cos(deg_to_rad(v.x)) + east * sin(deg_to_rad(v.x))
+		cam.pitch = deg_to_rad(v.y)
+		cam.distance = v.z
+	elif phase == SETTLE - 1:
+		var cb := cam.global_transform.basis
+		var worst := -9.0
+		for off in [Vector3.ZERO, cb.x * 0.45, -cb.x * 0.45, cb.y * 0.3, -cb.y * 0.3, -cb.z * 0.3, -cb.z * 0.3 + cb.x * 0.45, -cb.z * 0.3 - cb.x * 0.45]:
+			worst = maxf(worst, world.density_at(cam.global_position + off))
+		# inside a rock? (rocks are not part of the density field)
+		var in_rock := false
+		for c: Vector3i in world.chunks:
+			var ch: Chunk = world.chunks[c]
+			if ch.rocks.is_empty() or (ch.position + Vector3.ONE * 8.0).distance_to(cam.global_position) > 30.0:
+				continue
+			for r: RockInst in ch.rocks:
+				if r.pos.distance_to(cam.global_position) > r.size * 1.9 + 1.0:
+					continue
+				var rf := RockMesher.frame_of(r)
+				for off in [Vector3.ZERO, cb.x * 0.45, -cb.x * 0.45, cb.y * 0.3, -cb.y * 0.3, -cb.z * 0.3]:
+					if RockMesher._inside(r, rf, cam.global_position + off):
+						in_rock = true
+		var pivot := player.global_position + player.global_position.normalized() * 0.5
+		var blocked := 0
+		for i in range(1, 12):
+			if world.density_at(cam.global_position.lerp(pivot, i / 12.0)) > 0.0:
+				blocked += 1
+		var arm := cam.global_position.distance_to(pivot)
+		_sweep_res.append({"view": v, "worst": worst, "blocked": blocked, "arm": arm, "rock": in_rock, "hidden": not player.visible, "pitch_now": rad_to_deg(cam.pitch + cam._lift), "swing": rad_to_deg(cam._yaw_off)})
+
+func _sweep_report() -> void:
+	var inside := 0
+	var tight := 0
+	var blocked := 0
+	var rocks_in := 0
+	var rock_list: Array = []
+	var n := 0
+	var worst_list: Array = []
+	var block_list: Array = []
+	for r in _sweep_res:
+		if not (r is Dictionary):
+			continue
+		n += 1
+		if r.rock:
+			rocks_in += 1
+			rock_list.append(r)
+		if r.worst > 0.0:
+			inside += 1
+			worst_list.append(r)
+		elif r.worst > -0.15:
+			tight += 1
+		if r.blocked > 0 and r.arm > 1.2:
+			blocked += 1
+			block_list.append(r)
+	var pulled := 0
+	var hidden := 0
+	var topdown := 0
+	var swung := 0
+	var min_arm := 99.0
+	var closest := -99.0
+	for r in _sweep_res:
+		if r is Dictionary:
+			if r.arm < r.view.z - 0.6:
+				pulled += 1
+			if r.hidden:
+				hidden += 1
+			if r.pitch_now > 70.0:
+				topdown += 1
+			if absf(r.swing) > 20.0:
+				swung += 1
+			min_arm = minf(min_arm, r.arm)
+			closest = maxf(closest, r.worst)
+	gen.sample_column(player.global_position.normalized(), _col)
+	print("SWEEP scene: ball is %.1f m above the ground there; camera pulled in short of its distance in %d of %d views, shortest arm %.1f m, tightest clearance %.2f m" % [player.global_position.length() - R - _col.height, pulled, n, min_arm, -closest])
+	print("SWEEP the ball is hidden in %d views; the camera went (nearly) overhead in %d and swung round the ball in %d" % [hidden, topdown, swung])
+	print("SWEEP %d views: %d INSIDE the ground, %d INSIDE a rock, %d touching (<15 cm), %d with ground between camera and ball" % [n, inside, rocks_in, tight, blocked])
+	for r in rock_list.slice(0, 3):
+		print("  IN ROCK  heading %.0f pitch %.0f dist %.0f   arm %.1f" % [r.view.x, r.view.y, r.view.z, r.arm])
+	for r in worst_list.slice(0, 4):
+		print("  INSIDE   heading %.0f pitch %.0f dist %.0f   worst %.2f  arm %.1f" % [r.view.x, r.view.y, r.view.z, r.worst, r.arm])
+	for r in block_list.slice(0, 4):
+		print("  BLOCKED  heading %.0f pitch %.0f dist %.0f   solid samples %d/11  arm %.1f" % [r.view.x, r.view.y, r.view.z, r.blocked, r.arm])
+	get_tree().quit()
 
 ## Debugging aid (--hit=N): N blows with the tool at the current aim, as if the player held the button.
 func _debug_hit(n: int) -> void:
