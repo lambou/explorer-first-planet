@@ -291,6 +291,11 @@ func _init() -> void:
 	_river_tests()
 	_sky_tests()
 	_cave_spawn_tests()
+	_rock_tests()
+	_rock_placement_tests()
+	_rock_break_tests()
+	_rock_deposit_tests()
+	_rock_gravity_tests()
 
 	print("failures: ", failures)
 	quit(failures)
@@ -708,6 +713,668 @@ func _water_module_tests() -> void:
 	check(wsys.submersion(none, sea_d * (5120.0 + 5.0)) < 0.0, "above the sea: not submerged")
 	check(wsys.submersion(none, land_d * (5120.0 + 200.0)) < -1.0e8, "over land: no water")
 
+func _rock_tests() -> void:
+	print("== rocks: catalog ==")
+	var cat := RockCatalog.new(1337)
+	var keys := {}
+	var hosts_ok := true
+	for t in cat.types:
+		keys[t.key] = true
+		for h in t.hosts:
+			if cat.get_type(h) == null or not cat.get_type(h).is_base():
+				hosts_ok = false
+	print("  %d types: %d base, %d ore/gem/radioactive/exotic" % [cat.types.size(), cat.base_types().size(), cat.ore_types().size()])
+	check(keys.size() == cat.types.size(), "every rock type has its own key")
+	check(hosts_ok, "every ore names host rocks that exist")
+	for k in ["granite", "gold", "diamond", "uranium"]:
+		check(cat.get_type(k) != null, "the catalog has " + k)
+	var exotics: Array[String] = []
+	for t in cat.types:
+		if t.family == RockType.FAMILY_EXOTIC:
+			exotics.append("%s(%s)" % [t.name, ",".join(t.traits.keys())])
+	print("  unknown types of this world: ", exotics)
+	check(exotics.size() == RockCatalog.EXOTIC_COUNT, "the world has its unknown rock types")
+	var cat2 := RockCatalog.new(1337)
+	var same := true
+	for i in cat.types.size():
+		if cat.types[i].name != cat2.types[i].name or cat.types[i].color != cat2.types[i].color or cat.types[i].hardness != cat2.types[i].hardness:
+			same = false
+	check(same, "the same seed gives the same catalog")
+	var cat3 := RockCatalog.new(4242)
+	var differ := 0
+	for i in cat.types.size():
+		if cat.types[i].name != cat3.types[i].name:
+			differ += 1
+	check(differ >= 3, "another seed has other unknown rocks")
+	var base_ok := true
+	var seen := {}
+	for t in cat.base_types():
+		var k := "%.3f,%.3f" % [t.center.x, t.center.y]
+		if seen.has(k) or t.center.x < 0.0 or t.center.x > 1.0 or t.center.y < 0.0 or t.center.y > 1.0:
+			base_ok = false
+		seen[k] = true
+	check(base_ok, "base rocks have their own places in the province space")
+	check(cat.get_type("diamond").value > cat.get_type("granite").value * 50.0 and cat.get_type("diamond").hardness > cat.get_type("coal").hardness, "valuable rocks are harder and worth more")
+
+func _rock_placement_tests() -> void:
+	print("== rocks: geology and placement ==")
+	var g := PlanetGenerator.new(1337)
+	var cat := RockCatalog.new(1337)
+	var field := RockField.new(cat, 1337)
+	# provinces: every base rock appears somewhere, and regions are coherent (close places have the same rock)
+	var seen := {}
+	var same := 0
+	var total := 0
+	for i in 4000:
+		var d := PlanetGenerator.fibonacci_dir(i, 4000)
+		var b := field.base_at(d)
+		seen[b.key] = seen.get(b.key, 0) + 1
+		var t1 := d.cross(Vector3.UP).normalized()
+		if field.base_at((d + t1 * (20.0 / 5120.0)).normalized()).key == b.key:
+			same += 1
+		total += 1
+	print("  base rock shares: ", seen)
+	check(seen.size() == cat.base_types().size(), "every base rock has a region on the planet")
+	print("  places 20 m apart with the same base rock: %.1f%%" % (100.0 * same / total))
+	check(float(same) / total > 0.96, "places 20 m apart almost always share the same base rock (regions are coherent)")
+	# rules
+	var obsidian_diamond := RockField.ore_allowed(cat.get_type("diamond"), "obsidian", 100.0, -5.0, false)
+	check(obsidian_diamond, "diamond can form deep in obsidian / basalt country")
+	check(not RockField.ore_allowed(cat.get_type("diamond"), "obsidian", 0.0, 10.0, false), "diamond never lies on the surface")
+	check(not RockField.ore_allowed(cat.get_type("gold"), "limestone", 100.0, 0.0, false), "gold does not form in limestone")
+	check(not RockField.ore_allowed(cat.get_type("coal"), "sandstone", 0.0, -20.0, true), "coal is not found under the sea")
+	# placement on a land chunk
+	var sp := g.find_spawn()
+	var cc := VoxelWorld.world_to_chunk(sp)
+	var land_rocks := 0
+	var all_inside := true
+	var ungrounded := 0
+	var rock_total := 0
+	var scratch := Column.new()
+	var place_us := 0
+	var chunks_done := 0
+	var type_count := {}
+	var sizes := []
+	for dz in range(-4, 5):
+		for dy in range(-2, 3):
+			for dx in range(-4, 5):
+				var c := cc + Vector3i(dx, dy, dz)
+				var f := g.fill_chunk(c, Column.new(), 0, false)
+				var t1 := Time.get_ticks_usec()
+				var rocks := RockPlacer.place(g, field, c, f.dens, f.wlev)
+				place_us += Time.get_ticks_usec() - t1
+				chunks_done += 1
+				land_rocks += rocks.size()
+				var o := Vector3(c * 16)
+				for r: RockInst in rocks:
+					var lp := r.pos - o
+					if lp.x < 0.0 or lp.y < 0.0 or lp.z < 0.0 or lp.x >= 16.0 or lp.y >= 16.0 or lp.z >= 16.0:
+						all_inside = false
+					# solid ground under it in the chunk's own density field (what the mesh is made of)
+					var below := r.pos - r.normal * r.size * 1.3 - o
+					rock_total += 1
+					if RockPlacer._sample(f.dens, below) <= 0.0:
+						ungrounded += 1
+					var tn: String = cat.by_id(r.layers[0][0]).key
+					type_count[tn] = type_count.get(tn, 0) + 1
+					sizes.append(r.size)
+	print("  %d rocks in %d chunks around the spawn; host rocks %s" % [land_rocks, chunks_done, type_count])
+	check(land_rocks > 20, "rocks lie on the ground around the spawn")
+	check(all_inside, "every rock lies inside the chunk that owns it")
+	print("  rocks without solid ground under them: %d of %d" % [ungrounded, rock_total])
+	check(float(ungrounded) / maxf(rock_total, 1) < 0.03, "rocks rest on solid ground (over 97%)")
+	var big := 0
+	var small := 0
+	for z in sizes:
+		if z >= 1.3:
+			big += 1
+		if z < 0.5:
+			small += 1
+	print("  sizes: %d small (<0.5 m), %d big (>= 1.3 m) of %d" % [small, big, sizes.size()])
+	check(small > big and big > 0, "many small rocks, a few boulders")
+	# determinism and seed dependence
+	var f1 := g.fill_chunk(cc, Column.new(), 0, false)
+	var a := RockPlacer.place(g, field, cc, f1.dens, f1.wlev)
+	var b2 := RockPlacer.place(g, field, cc, f1.dens, f1.wlev)
+	var ident := a.size() == b2.size()
+	for i in a.size():
+		if ident and (a[i].id != b2[i].id or a[i].pos != b2[i].pos or a[i].layers != b2[i].layers):
+			ident = false
+	check(ident, "the same chunk always has the same rocks")
+	var g2 := PlanetGenerator.new(4242)
+	var field2 := RockField.new(RockCatalog.new(4242), 4242)
+	var other := RockPlacer.place(g2, field2, cc, f1.dens, f1.wlev)
+	var ids_a := {}
+	for r: RockInst in a:
+		ids_a[r.id] = true
+	var shared := 0
+	for r: RockInst in other:
+		if ids_a.has(r.id):
+			shared += 1
+	check(shared == 0, "another seed puts other rocks in the same place")
+	# veins: deep in caves and far down, ores show up; count ore rocks over a deep cave region
+	var ore_hits := {}
+	var deep_total := 0
+	for i in 3000:
+		var d := PlanetGenerator.fibonacci_dir(i, 3000)
+		var p := d * (5120.0 + 20.0 - 120.0)
+		var ctx := {"depth": 120.0, "alt": -100.0, "underwater": false}
+		var layers := field.choose(d, p, ctx, float(i % 97) / 97.0)
+		deep_total += 1
+		if layers.size() > 1:
+			var k: String = cat.by_id(layers[1][0]).key
+			ore_hits[k] = ore_hits.get(k, 0) + 1
+	print("  deep rocks: ores by type ", ore_hits, " of ", deep_total)
+	check(ore_hits.size() >= 4, "deep down several kinds of ore appear")
+	var surf_ores := 0
+	for i in 3000:
+		var d := PlanetGenerator.fibonacci_dir(i, 3000)
+		var layers := field.choose(d, d * 5130.0, {"depth": 0.0, "alt": 10.0, "underwater": false}, float(i % 97) / 97.0)
+		if layers.size() > 1 and cat.by_id(layers[1][0]).min_depth > 0.0:
+			surf_ores += 1
+	check(surf_ores == 0, "deep-only ores never lie on the surface")
+	# baking: 80 triangles per rock, clockwise (Godot's front face) with outward normals, exposure in the alpha
+	var sample_rocks: Array = []
+	var f2 := g.fill_chunk(cc + Vector3i(1, 0, 0), Column.new(), 0, false)
+	for dx in range(-3, 4):
+		var cx := cc + Vector3i(dx, 0, 0)
+		var ff := g.fill_chunk(cx, Column.new(), 0, false)
+		var rr := RockPlacer.place(g, field, cx, ff.dens, ff.wlev)
+		if rr.size() > 0:
+			sample_rocks = rr
+			f2 = ff
+			cc = cx
+			break
+	if sample_rocks.size() > 0:
+		var baked := RockMesher.bake(sample_rocks, cat, Vector3(cc * 16), f2.dens, f2.dens)
+		var vv: PackedVector3Array = baked.verts
+		var expect_tris := 0
+		for sr: RockInst in sample_rocks:
+			expect_tris += 320 if sr.size >= 1.0 else 80
+		check(vv.size() == expect_tris * 3, "every rock is baked into 80 triangles (320 from 1 m up)")
+		var winding_ok := true
+		var outward_ok := true
+		var alpha_ok := true
+		for i in range(0, vv.size(), 3):
+			var cr := (vv[i + 1] - vv[i]).cross(vv[i + 2] - vv[i])
+			var nn: Vector3 = (baked.normals as PackedVector3Array)[i]
+			if cr.dot(nn) > 0.0:
+				winding_ok = false
+			var al: float = (baked.colors as PackedColorArray)[i].a
+			if al < 0.05 or al > 1.0:
+				alpha_ok = false
+		check(winding_ok, "rock triangles are clockwise from outside (not culled)")
+		check(alpha_ok, "rocks carry a sky exposure like the terrain")
+		check(outward_ok, "normals point out")
+	# the world builds rocks for a chunk and shows them
+	var rw := VoxelWorld.new()
+	rw.setup(g)
+	var shown := false
+	for dz in range(-2, 3):
+		for dx in range(-2, 3):
+			var c3 := cc + Vector3i(dx, 0, dz)
+			var ch3 := rw._ensure_chunk(c3)
+			if ch3 != null and ch3.rocks.size() > 0 and ch3.rock_instance != null:
+				shown = true
+	check(shown, "a world chunk keeps its rocks and shows them as one mesh")
+	var per_chunk := place_us / 1000.0 / maxf(chunks_done, 1)
+	print("  rock placement alone: %.3f ms per chunk" % per_chunk)
+	check(per_chunk < 1.5, "placing the rocks of a chunk is cheap (< 1.5 ms)")
+
+## Relative volume of a rock: the mean of the cube of its surface radius over many directions.
+func _rock_volume(r: RockInst, f: Dictionary) -> float:
+	var sum := 0.0
+	var n := 160
+	for i in n:
+		var w := PlanetGenerator.fibonacci_dir(i, n)
+		var l := RockMesher.surface_radius(r, f, w)
+		sum += l * l * l
+	return sum / n
+
+func _rock_deposit_tests() -> void:
+	print("== rocks: buried deposits ==")
+	var g := PlanetGenerator.new(1337)
+	var rs := RockSystem.new()
+	rs.setup(g, 1337)
+	var dp := rs.deposits
+	var sp := g.find_spawn()
+	var base_cell := Vector3i(floori(sp.x / RockDeposits.CELL), floori(sp.y / RockDeposits.CELL), floori(sp.z / RockDeposits.CELL))
+	var col := Column.new()
+	var found: Array = []
+	var cells := 0
+	for dx in range(-6, 7):
+		for dy in range(-6, 7):
+			for dz in range(-6, 7):
+				var cell := base_cell + Vector3i(dx, dy, dz)
+				cells += 1
+				var d := dp.deposit_at_cell(cell, col)
+				if d != null:
+					found.append(d)
+	var sizes: Array[float] = []
+	var ores := 0
+	var big := 0
+	for d: RockInst in found:
+		sizes.append(d.size)
+		if d.layers.size() > 1:
+			ores += 1
+		if d.size >= 4.0:
+			big += 1
+	print("  around the spawn: %d deposits in %d cells (%d with ore, %d of 4 m or more)" % [found.size(), cells, ores, big])
+	check(found.size() > 20, "deposits lie under the ground all around")
+	check(ores > 0 and big > 0, "some are ore bodies and some are huge")
+	var small := 0
+	for z in sizes:
+		if z < 2.5:
+			small += 1
+	check(small > found.size() / 2, "most are small, a few are huge")
+	# deterministic, and seed dependent
+	var again := dp.deposit_at_cell(base_cell + Vector3i(0, 0, 0), col)
+	var first := found[0] as RockInst
+	var cell_first := Vector3i(floori(first.pos.x / RockDeposits.CELL), floori(first.pos.y / RockDeposits.CELL), floori(first.pos.z / RockDeposits.CELL))
+	var re := dp.deposit_at_cell(cell_first, col)
+	check(re != null and re.id == first.id and re.pos == first.pos and re.layers == first.layers, "the same cell always holds the same deposit")
+	var rs2 := RockSystem.new()
+	rs2.setup(PlanetGenerator.new(4242), 4242)
+	var other := rs2.deposits.deposit_at_cell(cell_first, col)
+	check(other == null or other.id != first.id, "another seed buries other rocks")
+	# the pocket: exactly the rock's shape, a hair smaller, sealed in solid rock
+	var pick: RockInst = null
+	for d: RockInst in found:
+		if d.layers.size() > 1 and d.size >= 1.5:
+			pick = d
+			break
+	if pick == null:
+		pick = first
+	var cc := VoxelWorld.world_to_chunk(pick.pos)
+	var f := g.fill_chunk(cc, Column.new(), 0, true)
+	var before: PackedFloat32Array = f.dens.duplicate()
+	rs.carve_chunk(cc, f.dens)
+	var origin := Vector3(cc * 16)
+	var fr := RockMesher.frame_of(pick)
+	var l_dir := Vector3(0.3, 0.5, 0.8).normalized()
+	var l_world: Vector3 = fr.x * l_dir.x + fr.y * l_dir.y + fr.z * l_dir.z
+	var rl := RockMesher.blob_radius(pick, fr, l_dir)
+	var in_chunk := func(p: Vector3) -> bool:
+		var q: Vector3 = p - origin
+		return q.x >= 0.0 and q.y >= 0.0 and q.z >= 0.0 and q.x < 15.0 and q.y < 15.0 and q.z < 15.0
+	var d_in: float = RockPlacer._sample(f.dens, pick.pos + l_world * (rl - 0.45) - origin) if in_chunk.call(pick.pos + l_world * (rl - 0.45)) else -9.0
+	var d_out: float = RockPlacer._sample(f.dens, pick.pos + l_world * (rl + 0.6) - origin) if in_chunk.call(pick.pos + l_world * (rl + 0.6)) else 9.0
+	print("  pocket of a %.1f m deposit: density just inside the rock %.2f, just outside %.2f" % [pick.size, d_in, d_out])
+	check(d_in < 0.0 and d_out > 0.0, "the pocket follows the rock's shape: hollow inside, solid right outside")
+	var changed_samples := 0
+	for i in f.dens.size():
+		if f.dens[i] != before[i]:
+			changed_samples += 1
+	check(changed_samples > 0, "carving a chunk with a deposit changes its density")
+	# the chunk next door sees the same hollow on the shared padding (no seam)
+	var f_next := g.fill_chunk(cc + Vector3i(1, 0, 0), Column.new(), 0, true)
+	rs.carve_chunk(cc + Vector3i(1, 0, 0), f_next.dens)
+	var seam_ok := true
+	for k in 18:
+		for j in 18:
+			var a: float = f.dens[16 + 18 * (j + 18 * k)]       # my sample at local x = 15 (padded index 16)
+			var b: float = f_next.dens[0 + 18 * (j + 18 * k)]   # its sample at local x = -1 (padded index 0): world x = 15
+			if absf(a - b) > 0.001:
+				seam_ok = false
+	check(seam_ok, "neighbouring chunks carve the same pocket on their shared samples")
+	# the rock sits in its pocket: it belongs to the chunk of its centre, underground chunks only
+	var owner := rs.build_chunk(cc, before, f.wlev, f.dens, {}, true)
+	var has_it := false
+	for r: RockInst in owner.rocks:
+		if r.id == pick.id:
+			has_it = true
+	check(has_it, "an underground chunk holds the buried rock of its pocket")
+	var surface_only := rs.build_chunk(cc, before, f.wlev, f.dens, {}, false)
+	var has_it2 := false
+	for r: RockInst in surface_only.rocks:
+		if r.id == pick.id:
+			has_it2 = true
+	check(not has_it2, "a surface-only chunk does not build buried rocks")
+	# indicators: ore pieces on the ground above an ore deposit
+	var ind_found := 0
+	var ind_ok := true
+	var ind_dep: RockInst = null
+	for d: RockInst in found:
+		if d.layers.size() > 1 and d.size >= 2.0:
+			ind_dep = d
+			break
+	if ind_dep != null:
+		var up := ind_dep.pos.normalized()
+		g.sample_height(up, col, 1)
+		var surf := up * (5120.0 + col.height)
+		var sc := VoxelWorld.world_to_chunk(surf)
+		for dx in range(-1, 2):
+			for dy in range(-1, 2):
+				for dz in range(-1, 2):
+					for m: RockInst in dp.markers_for(sc + Vector3i(dx, dy, dz)):
+						if m.layers.size() == 1 and m.layers[0][0] == ind_dep.core_type():
+							ind_found += 1
+							var lateral := (m.pos - up * m.pos.dot(up) - (ind_dep.pos - up * ind_dep.pos.dot(up))).length()
+							if lateral > ind_dep.size * 1.1 + 1.0 or m.size > 0.46:
+								ind_ok = false
+		print("  a %.1f m %s deposit %.0f m down: %d tiny ore pieces on the ground above it" % [ind_dep.size, rs.catalog.by_id(ind_dep.core_type()).name, col.height - (ind_dep.pos.length() - 5120.0), ind_found])
+	check(ind_found >= 1 and ind_ok, "tiny pieces of the same ore on the surface mark a deposit below")
+	# efficiency: the deposit work of a chunk (pocket carving + indicators), measured over 49 chunks around the spot
+	var work_us := 0
+	var n := 0
+	for dx in range(-3, 4):
+		for dz in range(-3, 4):
+			var c4 := cc + Vector3i(dx, 0, dz)
+			var f4 := g.fill_chunk(c4, Column.new(), 0, true)
+			var t1 := Time.get_ticks_usec()
+			rs.carve_chunk(c4, f4.dens)
+			rs.deposits.markers_for(c4)
+			work_us += Time.get_ticks_usec() - t1
+			n += 1
+	var per := work_us / 1000.0 / n
+	print("  deposit work (pocket carve + indicators) per chunk: %.2f ms" % per)
+	check(per < 12.0, "the deposits cost little per chunk (< 12 ms, on the worker thread)")
+
+func _rock_gravity_tests() -> void:
+	print("== rocks: gravity ==")
+	var g := PlanetGenerator.new(1337)
+	var w := VoxelWorld.new()
+	w.setup(g)
+	var sp := g.find_spawn()
+	var cc := VoxelWorld.world_to_chunk(sp)
+	for dz in range(-2, 3):
+		for dy in range(-2, 3):
+			for dx in range(-2, 3):
+				w._ensure_chunk(cc + Vector3i(dx, dy, dz))
+	var ph := RockPhysics.new()
+	ph.world = w
+	w.terrain_edited.connect(ph.after_edit)
+	var loose: RockInst = null
+	var loose_ch: Chunk = null
+	var fixed_rock: RockInst = null
+	var fixed_ch: Chunk = null
+	var n_loose := 0
+	var n_fixed := 0
+	for c: Vector3i in w.chunks:
+		var ch: Chunk = w.chunks[c]
+		for r: RockInst in ch.rocks:
+			if r.fixed:
+				n_fixed += 1
+				if fixed_rock == null and r.size >= 0.4:
+					fixed_rock = r
+					fixed_ch = ch
+			else:
+				n_loose += 1
+				if loose == null and r.size >= 0.4 and r.size <= 1.5 and ph.supported(r):
+					loose = r
+					loose_ch = ch
+	print("  rocks around the spawn: %d loose, %d fixed (sunk into the floor)" % [n_loose, n_fixed])
+	check(n_loose > 0 and n_fixed > 0, "some rocks are loose bodies and some are fixed in the floor")
+	check(loose != null and ph.supported(loose), "a loose rock at rest is supported by the ground")
+	if loose != null:
+		var up := loose.pos.normalized()
+		var alt0 := loose.pos.length()
+		var id := loose.id
+		var t0 := Time.get_ticks_usec()
+		# dig the ground out from under it
+		w.carve(loose.pos - up * (loose.size * 0.9), loose.size * 1.2 + 1.8)
+		var started_ms := (Time.get_ticks_usec() - t0) / 1000.0
+		check(not ph.supported(loose) or ph.active() > 0, "digging away the ground under it leaves it unsupported")
+		check(ph.active() >= 1, "an unsupported loose rock starts to fall")
+		check(not loose_ch.rocks.has(loose), "it leaves its chunk's baked mesh while it falls (one small node)")
+		var steps := 0
+		while ph.active() > 0 and steps < 900:
+			ph._physics_process(1.0 / 60.0)
+			steps += 1
+		var drop := alt0 - loose.pos.length()
+		print("  it fell %.1f m and came to rest after %.1f s (edit + start cost %.1f ms)" % [drop, steps / 60.0, started_ms])
+		check(ph.active() == 0, "the falling rock comes to rest")
+		check(drop > 0.8, "it dropped into the hole")
+		check(ph.supported(loose), "and rests on solid ground again")
+		check(w.rocks.changed.has(id) and (w.rocks.changed[id] as Dictionary).has("state") and loose.moved, "its new place is stored (persistent)")
+		var dest := VoxelWorld.world_to_chunk(loose.pos)
+		var snap := w.rocks.broken_snapshot()
+		var f2 := g.fill_chunk(dest, Column.new(), 0, true)
+		var rebuilt := w.rocks.build_chunk(dest, f2.dens, f2.wlev, f2.dens, snap, true)
+		var there := false
+		for r: RockInst in rebuilt.rocks:
+			if r.id == id and r.pos.distance_to(loose.pos) < 0.01:
+				there = true
+		check(there, "a rebuilt chunk has the fallen rock where it came to rest")
+		var origin_c := VoxelWorld.world_to_chunk(Vector3(0, 0, 0))
+		var f3 := g.fill_chunk(loose_ch.coord, Column.new(), 0, true)
+		var orig := w.rocks.build_chunk(loose_ch.coord, f3.dens, f3.wlev, f3.dens, snap, true)
+		var still_there := false
+		for r: RockInst in orig.rocks:
+			if r.id == id and loose_ch.coord != dest:
+				still_there = true
+		check(not still_there, "and its old chunk no longer holds it")
+		# a displaced rock that is then hit keeps its new place
+		w.rocks.hit(loose, dest_rocks_of(w, dest), 1.0)
+		check((w.rocks.changed[id] as Dictionary).has("state"), "a displaced rock keeps its place when it is chipped")
+	if fixed_rock != null:
+		var upf := fixed_rock.pos.normalized()
+		var tf := upf.cross(Vector3.UP if absf(upf.y) < 0.95 else Vector3.RIGHT).normalized()
+		# the ground BESIDE it is dug (the sphere does not touch the rock): it is still sunk into the floor and stays
+		w.carve(fixed_rock.pos + tf * (fixed_rock.size + 2.4 + 0.6), 2.4)
+		check(fixed_ch.rocks.has(fixed_rock), "a rock sunk into the floor stays when the ground beside it is dug")
+		# the floor around it is dug away: nothing holds it any more and it falls
+		var active0 := ph.active()
+		w.carve(fixed_rock.pos, fixed_rock.size * 1.7 + 2.0)
+		check(ph.active() > active0 or not fixed_ch.rocks.has(fixed_rock), "a sunk rock whose floor is dug away all around falls")
+		var st := 0
+		while ph.active() > 0 and st < 900:
+			ph._physics_process(1.0 / 60.0)
+			st += 1
+	# pebbles cannot bend the floor: none is fixed
+	var fixed_pebbles := 0
+	var pebbles := 0
+	for c: Vector3i in w.chunks:
+		for r: RockInst in (w.chunks[c] as Chunk).rocks:
+			if r.size < 0.4:
+				pebbles += 1
+				if r.fixed:
+					fixed_pebbles += 1
+	check(pebbles > 0 and fixed_pebbles == 0, "tiny rocks are always loose (they cannot bend the floor)")
+	# after digging, no rock near the edit is left hanging in the air
+	var spot := sp
+	for i in 3:
+		w.carve(spot + (Vector3(i * 2.5 - 2.5, 0, 0)), 2.6)
+	var guard := 0
+	while ph.active() > 0 and guard < 1200:
+		ph._physics_process(1.0 / 60.0)
+		guard += 1
+	var hanging := 0
+	var nearby := 0
+	for c: Vector3i in w.chunks:
+		for r: RockInst in (w.chunks[c] as Chunk).rocks:
+			if r.pos.distance_to(spot) < 9.0:
+				nearby += 1
+				if not ph.supported(r):
+					hanging += 1
+	print("  after digging: %d rocks near the hole, %d left hanging" % [nearby, hanging])
+	check(hanging == 0, "after a dig no rock near it is left floating")
+	# cost of the check: an edit with many rocks around
+	var t1 := Time.get_ticks_usec()
+	for i in 10:
+		ph.after_edit(sp, 3.0)
+	print("  support check of an edit: %.2f ms" % ((Time.get_ticks_usec() - t1) / 1000.0 / 10.0))
+	check((Time.get_ticks_usec() - t1) / 1000.0 / 10.0 < 8.0, "checking the rocks next to an edit is cheap (< 8 ms)")
+	ph.free()
+	w.free()
+
+func dest_rocks_of(w: VoxelWorld, c: Vector3i) -> Array:
+	var ch: Chunk = w.chunks.get(c)
+	return ch.rocks if ch != null else []
+
+func _rock_break_tests() -> void:
+	print("== rocks: breaking and harvesting ==")
+	var g := PlanetGenerator.new(1337)
+	var rs := RockSystem.new()
+	rs.setup(g, 1337)
+	var cat := rs.catalog
+	var rock := RockInst.new()
+	rock.id = 777
+	rock.size = 1.0
+	rock.layers = [[cat.get_type("granite").id, 1.0], [cat.get_type("gold").id, 0.5]]
+	var rocks: Array = [rock]
+	var events: Array = []
+	var hits := 0
+	while rocks.has(rock) and hits < 500:
+		var res := rs.hit(rock, rocks)
+		hits += 1
+		if res.event != "hit":
+			events.append(res.event)
+	print("  granite shell + gold core, size 1: %d hits, events %s, harvest %s" % [hits, events, rs.inventory])
+	check(events == ["shed", "broken"], "a layered rock loses its shell first, then breaks")
+	check(rs.inventory.get("granite", 0) > 0 and rs.inventory.get("gold", 0) > 0, "both layers are harvested")
+	check(rs.changed.get(777) == true and not rocks.has(rock), "a broken rock is gone and remembered by its id")
+	# blows needed: far more for a big or solid rock
+	var hit_counts := {}
+	for key in ["coal", "granite", "diamond"]:
+		for sz in [0.5, 1.0, 2.5, 5.0]:
+			var tr := RockInst.new()
+			tr.size = sz
+			tr.layers = [[cat.get_type(key).id, 1.0]]
+			hit_counts["%s %.1f" % [key, sz]] = int(ceilf(rs.layer_hardness(tr)))
+	print("  blows to break (bare rock): ", hit_counts)
+	check(hit_counts["granite 5.0"] > hit_counts["granite 0.5"] * 40, "a huge rock takes way more blows than a small one")
+	check(hit_counts["granite 1.0"] > hit_counts["coal 1.0"], "a solid rock takes more blows than a soft one")
+	check(hit_counts["diamond 2.5"] > hit_counts["granite 2.5"], "the hardest stone takes the longest at the same size")
+	# a blow takes a BITE out of the rock where it landed; the rest of the rock is untouched (no overall shrinking)
+	var dr := RockInst.new()
+	dr.id = 888
+	dr.size = 1.2
+	dr.shape = 4242
+	dr.layers = [[cat.get_type("granite").id, 1.0], [cat.get_type("iron").id, 0.45]]
+	dr.pos = Vector3(0, 100, 0)
+	dr.normal = Vector3.UP
+	var fr := RockMesher.frame_of(dr)
+	var side := Vector3(1, 0.3, 0).normalized()                 # in the world
+	var opposite := -side
+	var side_l := Vector3(side.dot(fr.x), side.dot(fr.y), side.dot(fr.z))      # the same directions in the rock's own frame
+	var opp_l := -side_l
+	var r_side0 := RockMesher.surface_radius(dr, fr, side_l)
+	var r_opp0 := RockMesher.surface_radius(dr, fr, opp_l)
+	var drs: Array = [dr]
+	var sh0 := RockMesher.surface_hit(dr, dr.pos + side * 6.0, -side, 20.0)
+	check(sh0.hit and absf(sh0.t - (6.0 - r_side0)) < 0.08, "aiming finds the rock's real surface")
+	rs.hit(dr, drs, 1.0, sh0.point)
+	var r_side1 := RockMesher.surface_radius(dr, fr, side_l)
+	var r_opp1 := RockMesher.surface_radius(dr, fr, opp_l)
+	print("  radius towards the blow: %.2f -> %.2f m; on the far side: %.2f -> %.2f m" % [r_side0, r_side1, r_opp0, r_opp1])
+	check(dr.bites.size() == 1 and r_side1 < r_side0 - 0.1, "a blow takes a bite out of the rock where it landed")
+	check(absf(r_opp1 - r_opp0) < 0.001, "the rest of the rock is untouched: a hole, not a shrink")
+	var sh1 := RockMesher.surface_hit(dr, dr.pos + side * 6.0, -side, 20.0)
+	check(sh1.hit and sh1.t > sh0.t + 0.05, "the next blow lands on the new, deeper surface")
+	check(rs.changed.has(888) and (rs.changed[888].bites as Array).size() == 1, "the bites are stored with the rock")
+	check((RockMesher.bake([dr], cat, Vector3.ZERO).verts as PackedVector3Array).size() == 1280 * 3, "a bitten rock is baked finely enough to show the bite (1280 triangles)")
+	# coherence over a whole rock: it is eaten away blow by blow and the last blow removes what is left
+	var wr := RockInst.new()
+	wr.id = 999
+	wr.size = 2.5
+	wr.shape = 31337
+	wr.pos = Vector3(0, 100, 0)
+	wr.normal = Vector3.UP
+	wr.layers = [[cat.get_type("granite").id, 1.0]]
+	var wf := RockMesher.frame_of(wr)
+	var vol0 := _rock_volume(wr, wf)
+	var wrocks: Array = [wr]
+	var need := int(ceilf(rs.layer_hardness(wr)))
+	var vols: Array[float] = []
+	var gone_at := -1
+	for i in need + 2:
+		var dir := PlanetGenerator.fibonacci_dir(i * 7, need * 7)         # blows all over the rock, as a player would
+		if dir.y < 0.0:
+			dir.y = -dir.y
+		var sh := RockMesher.surface_hit(wr, wr.pos + dir * 12.0, -dir, 40.0)
+		var res2 := rs.hit(wr, wrocks, 1.0, sh.point if sh.hit else Vector3.INF)
+		if res2.event == "broken":
+			gone_at = i + 1
+			break
+		vols.append(_rock_volume(wr, wf) / vol0)
+	print("  size 2.5 granite: %d blows, gone at blow %d; part of the rock left before the last blow: %.0f%%" % [need, gone_at, 100.0 * vols[vols.size() - 1]])
+	check(gone_at <= need and gone_at >= int(need * 0.9), "the rock is gone on its last blows (nothing left to keep hitting)")
+	var eaten := true
+	for i in range(1, vols.size()):
+		if vols[i] > vols[i - 1] + 0.0001:
+			eaten = false
+	check(eaten and vols[vols.size() - 1] < 0.45, "the rock is eaten away blow by blow and little is left for the last blow")
+	check(vols[0] > 0.8, "one blow only takes a bite: the rock is still almost whole")
+	# a layered rock: the shell is eaten, falls away on its last blow and leaves the core (smaller, no bites)
+	var lw := RockInst.new()
+	lw.size = 2.0
+	lw.shape = 5
+	lw.pos = Vector3(0, 100, 0)
+	lw.normal = Vector3.UP
+	lw.layers = [[cat.get_type("granite").id, 1.0], [cat.get_type("gold").id, 0.5]]
+	var lneed := int(ceilf(rs.layer_hardness(lw)))
+	var lrocks: Array = [lw]
+	var shed_at := -1
+	for i in lneed + 2:
+		var res3 := rs.hit(lw, lrocks)
+		if res3.event == "shed":
+			shed_at = i + 1
+			break
+	check(shed_at == lneed and absf(lw.size - 1.0) < 0.01 and lw.bites.is_empty(), "the shell goes on its last blow and the core is left")
+	# reach: the arm is short
+	check(ToolAim.REACH <= 5.0, "the tool only reaches about an arm's length from the ball")
+	# harder and bigger rocks take more hits
+	var soft := RockInst.new()
+	soft.size = 1.0
+	soft.layers = [[cat.get_type("coal").id, 1.0]]
+	var hard := RockInst.new()
+	hard.size = 1.0
+	hard.layers = [[cat.get_type("diamond").id, 1.0]]
+	var big := RockInst.new()
+	big.size = 3.0
+	big.layers = [[cat.get_type("coal").id, 1.0]]
+	check(rs.layer_hardness(hard) > rs.layer_hardness(soft) * 3.0, "diamond is much harder to break than coal")
+	check(rs.layer_hardness(big) > rs.layer_hardness(soft) * 3.0, "a boulder takes more hits than a pebble of the same stuff")
+	check(rs.layer_units(big) > rs.layer_units(soft), "a boulder yields more")
+	# persistence: a chunk rebuilt later leaves broken rocks out and keeps chipped ones chipped
+	var cc := VoxelWorld.world_to_chunk(g.find_spawn())
+	var field := rs.field
+	var f := g.fill_chunk(cc, Column.new(), 0, false)
+	var natural := RockPlacer.place(g, field, cc, f.dens, f.wlev)
+	if natural.size() >= 2:
+		var snap := {natural[0].id: true, natural[1].id: {"layers": [[cat.get_type("quartzite").id, 1.0]], "size": 0.4, "hits": 0.0}}
+		var rebuilt := rs.build_chunk(cc, f.dens, f.wlev, f.dens, snap)
+		var ids := {}
+		var chipped_ok := false
+		for r: RockInst in rebuilt.rocks:
+			ids[r.id] = true
+			if r.id == natural[1].id and r.size == 0.4 and r.layers.size() == 1:
+				chipped_ok = true
+		check(not ids.has(natural[0].id) and chipped_ok, "broken rocks stay gone and chipped rocks stay chipped when a chunk is rebuilt")
+	# picking: a ray finds the nearest rock
+	var ch := Chunk.new()
+	ch.position = Vector3(0, 0, 0)
+	var r1 := RockInst.new()
+	r1.pos = Vector3(5, 0, 0)
+	r1.size = 1.0
+	r1.layers = [[0, 1.0]]
+	var r2 := RockInst.new()
+	r2.pos = Vector3(9, 0, 0)
+	r2.size = 1.0
+	r2.layers = [[0, 1.0]]
+	ch.rocks = [r2, r1]
+	var pick := RockSystem.ray_rocks({Vector3i.ZERO: ch}, Vector3.ZERO, Vector3.RIGHT, 20.0)
+	check(pick.hit and pick.rock == r1 and pick.t > 2.8 and pick.t < 4.4, "a ray picks the nearest rock (on its real surface)")
+	check(not RockSystem.ray_rocks({Vector3i.ZERO: ch}, Vector3.ZERO, Vector3.UP, 20.0).hit, "a ray that misses picks nothing")
+	ch.free()
+	# the camera turns only by what pushes past the action perimeter
+	var oc := OrbitCamera.new()
+	var yaw0 := oc._yaw_input
+	oc.turn(Vector2(100, 0))
+	check(oc._yaw_input < yaw0, "a push past the perimeter turns the camera")
+	oc.free()
+	# debris: pieces appear, fall, and all vanish after a couple of seconds; never more than MAX
+	var deb := RockDebris.new()
+	deb.burst(Vector3(0, 5120, 0), Vector3.UP, [Color.RED, Color.BLUE], 40, 0.2)
+	check(deb.active() == 40, "a burst creates its pieces")
+	deb.burst(Vector3(0, 5120, 0), Vector3.UP, [Color.RED], 200, 0.2)
+	check(deb.active() == RockDebris.MAX, "debris is capped (the oldest are recycled)")
+	for i in 100:
+		deb._process(0.05)
+	check(deb.active() == 0, "all debris vanishes after a few seconds")
+	deb.free()
+
 func _cave_spawn_tests() -> void:
 	print("== cave spawn ==")
 	var g := PlanetGenerator.new(1337)
@@ -762,6 +1429,19 @@ func _sky_tests() -> void:
 	check(m.get_shader_parameter("sun_dir") == Vector3(0, 1, 0) and m.get_shader_parameter("up_dir") == Vector3(1, 0, 0), "the sky receives the sun direction and the local up")
 	check(m.shader.code.contains("clouds") and m.shader.code.contains("stars"), "the sky has clouds and stars")
 	check(Radar.SHADER.contains("twilight") and Radar.SHADER.contains("night_col"), "the radar globe shows day, night and the sunrise/sunset line")
+	# the start: early morning at any place (sun low, rising)
+	var morning_ok := true
+	for up in [Vector3(0, 1, 0).normalized(), Vector3(1, 0.2, 0.3).normalized(), Vector3(-0.2, 0.5, -0.8).normalized(), Vector3(0.1, -0.3, 0.9).normalized()]:
+		for decl in [-0.4, 0.0, 0.34]:
+			var a := SkyDome.sun_angle_for_elevation(up, decl, 0.18, true)
+			var e: float = up.dot(Vector3(cos(decl) * cos(a), sin(decl), cos(decl) * sin(a)))
+			var a2 := a + 0.01
+			var e2: float = up.dot(Vector3(cos(decl) * cos(a2), sin(decl), cos(decl) * sin(a2)))
+			var rho := Vector2(up.x, up.z).length()
+			var reachable: bool = absf((0.18 - sin(decl) * up.y) / (cos(decl) * rho)) <= 1.0
+			if reachable and (absf(e - 0.18) > 0.001 or e2 <= e):
+				morning_ok = false
+	check(morning_ok, "the start sun is low and rising (early morning) wherever you spawn")
 	check(absf(SkyDome.horizon_sine(5120.0)) < 1e-6, "at sea level the horizon is at eye level")
 	var dip := rad_to_deg(asin(-SkyDome.horizon_sine(5120.0 + 147.0)))
 	print("  horizon dip at +147 m: %.1f degrees (expected ~13.6)" % dip)

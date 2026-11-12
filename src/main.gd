@@ -13,6 +13,13 @@ var far: FarTerrain
 var player: BallPlayer
 var cam: OrbitCamera
 var hud: Hud
+var debris: RockDebris
+var physics: RockPhysics
+var aim: ToolAim
+var _tool_cd := 0.0           # seconds until the tool may strike again while the button is held
+var _vcur := Vector2.ZERO      # the tool's cursor (viewport pixels): moves inside the action perimeter, pushes the camera at its edge
+var _pushing := false          # the cursor is against the perimeter and turning the camera
+const PERIMETER := 0.30        # radius of the action perimeter as a fraction of the window height
 var sun: DirectionalLight3D
 var sun_disc: MeshInstance3D
 var env: Environment
@@ -42,6 +49,13 @@ func _ready() -> void:
 	world = VoxelWorld.new()
 	add_child(world)
 	world.setup(gen)
+	debris = RockDebris.new()
+	debris.world = world
+	add_child(debris)
+	physics = RockPhysics.new()
+	physics.world = world
+	add_child(physics)
+	world.terrain_edited.connect(physics.after_edit)      # digging: loose rocks next to it may fall
 	far = FarTerrain.new()
 	add_child(far)
 	far.setup(gen, world.water)
@@ -59,6 +73,9 @@ func _ready() -> void:
 		else:
 			print("No cave found for the spawn; using the surface spawn")
 	player.position = player.spawn_pos
+	# the game starts in the early morning at the spawn: the sun just above the horizon and rising, never at night
+	if not _repro.has("sun"):
+		sun_angle = SkyDome.sun_angle_for_elevation(player.spawn_pos.normalized(), deg_to_rad(AXIAL_TILT) * sin(season), 0.18, true)
 
 	cam = OrbitCamera.new()
 	cam.target = player
@@ -72,7 +89,13 @@ func _ready() -> void:
 	hud = Hud.new()
 	add_child(hud)
 	hud.radar.setup(gen)
-	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
+	# the mouse aims the tool inside the action perimeter; pushing past its edge turns the camera (see _unhandled_input)
+	# capture the mouse only while the window really has focus (started from the editor it may be in the background):
+	# otherwise it stays free until the player clicks in the game
+	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED if (DisplayServer.window_is_focused() or _repro.has("pos")) else Input.MOUSE_MODE_VISIBLE
+	_vcur = get_viewport().get_visible_rect().size * 0.5
+	aim = ToolAim.new()
+	add_child(aim)
 	_apply_repro()
 
 ## Launch options that load the exact view from a captured HUD panel (the panel prints the same numbers):
@@ -85,6 +108,8 @@ func _apply_repro() -> void:
 			player.position = Vector3(v[0], v[1], v[2])
 			player.spawn_pos = player.position
 	cam.locked = _repro.has("pos")
+	if _repro.has("reach"):
+		aim.reach = float(_repro.reach)
 	if _repro.has("pitch"):
 		cam.pitch = deg_to_rad(float(_repro.pitch))
 	if _repro.has("dist"):
@@ -149,7 +174,15 @@ func _sun_dir() -> Vector3:
 	var decl := deg_to_rad(AXIAL_TILT) * sin(season)
 	return Vector3(cos(decl) * cos(sun_angle), sin(decl), cos(decl) * sin(sun_angle)).normalized()
 
+## Leaving the window (alt-tab, another window in front) frees the mouse; a click in the game takes it back.
+func _notification(what: int) -> void:
+	if (what == NOTIFICATION_APPLICATION_FOCUS_OUT or what == NOTIFICATION_WM_WINDOW_FOCUS_OUT) and not _repro.has("pos"):
+		Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+
 func _process(delta: float) -> void:
+	# safety net: never keep the mouse captured while the window is not the active one
+	if Input.mouse_mode == Input.MOUSE_MODE_CAPTURED and not _repro.has("pos") and not DisplayServer.window_is_focused():
+		Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
 	world.update_center(player.global_position)
 	far.update_center(player.global_position)
 	world.set_view(cam.global_position, -cam.global_transform.basis.z)
@@ -162,15 +195,42 @@ func _process(delta: float) -> void:
 	else:
 		far.set_sky_cut(Vector3.ZERO, Vector3.ZERO, 0.0)
 	_frame += 1
+	if _repro.has("aim"):
+		_vcur = _repro_mouse()
+	aim.pick(cam, world, player.global_position, _vcur)
+	var vsize := get_viewport().get_visible_rect().size
+	var cstate := 0
+	if aim.target.kind != "none":
+		cstate = 2 if not aim.target.in_reach else (3 if aim.target.kind == "rock" else 1)
+	hud.aim_overlay.update_state(vsize * 0.5, vsize.y * PERIMETER, _vcur, cstate, _pushing, Input.mouse_mode == Input.MOUSE_MODE_CAPTURED)
+	_pushing = false
+	_tool_cd -= delta
+	if Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT) and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED and _tool_cd <= 0.0:
+		_tool_cd = 0.24
+		_use_tool(Input.is_key_pressed(KEY_SHIFT))
 	if _repro.has("nofar"):
 		far.visible = false          # debugging aid: which layer draws what
 	if _repro.has("pos"):
 		player.freeze = true                      # hold the captured position
-		if _repro.has("shot") and _frame == 360:
-			get_viewport().get_texture().get_image().save_png(String(_repro.shot))
-			get_tree().quit()
+		if _repro.has("dig") and _frame == 300:
+			# debugging aid (--dig=x,y,z,r): dig a sphere there, as the tool would
+			var dg := String(_repro.dig).split_floats(",")
+			if dg.size() == 4:
+				world.carve(Vector3(dg[0], dg[1], dg[2]), dg[3])
+		if _repro.has("digdown") and _frame == 300:
+			# debugging aid (--digdown=N): a shaft N metres deep straight down from the player
+			var upd := player.global_position.normalized()
+			var k := 0.0
+			while k <= float(_repro.digdown):
+				world.carve(player.global_position - upd * (k + 1.0), 2.4)
+				k += 2.0
+		if _repro.has("hit") and _frame == 352:
+			_debug_hit(int(_repro.hit))
 	elif player.freeze and world.is_area_ready(player.global_position):
 		player.freeze = false
+	if _repro.has("shot") and _frame == int(_repro.get("shotframe", 360)):          # --shot=file.png works with or without --pos
+		get_viewport().get_texture().get_image().save_png(String(_repro.shot))
+		get_tree().quit()
 
 	if not _repro.has("sun"):
 		sun_angle += delta * TAU / DAY_LENGTH
@@ -266,8 +326,10 @@ func _update_hud(day: float) -> void:
 		+ "%s\n" % world.stats().replace("  building", " | build")
 		+ "%s\n" % far.stats().replace("  building", " | build")
 		+ "%s   FPS %d\n\n" % ["FLY" if player.fly else "ROLL", Engine.get_frames_per_second()]
-		+ "[WASD] move\n[Space] jump / swim up\n[Ctrl] dive\n[F] fly\n[R] respawn\n[C] cave spawn (Shift: sinkhole)\n[LMB] dig\n[RMB] place\n"
-		+ "[wheel / +/-] radar zoom\n[Ctrl+wheel] camera\n[Esc] mouse")
+		+ aim.describe(world)
+		+ _harvest_text()
+		+ "[WASD] move\n[Space] jump / swim up\n[Ctrl] dive\n[F] fly\n[R] respawn\n[C] cave spawn (Shift: sinkhole)\n[LMB] break / dig (hold)\n[RMB] place stone\n[mouse past the circle] turn camera\n"
+		+ "[wheel / +/-] radar zoom\n[Ctrl+wheel] camera\n[Esc] free mouse")
 
 ## The nearest cave of either kind: a closed room (dark, fine) or a sinkhole floor open to the sky (daylight).
 ## `lit`: only the sinkhole kind (a shaft up to the sky; whether daylight really reaches is up to the sky detection).
@@ -283,6 +345,50 @@ func _cave_spawn_from(from_dir: Vector3, lit: bool) -> Vector3:
 		return open_cave
 	return open_cave if open_cave.angle_to(from_dir) <= closed.angle_to(from_dir) else closed
 
+## Debugging aid (--hit=N): N blows with the tool at the current aim, as if the player held the button.
+func _debug_hit(n: int) -> void:
+	for i in n:
+		aim.pick(cam, world, player.global_position, _repro_mouse())
+		if aim.target.kind == "none":
+			print("nothing under the tool")
+			return
+		print("blow ", i + 1, ": ", _use_tool(false))
+
+func _repro_mouse() -> Vector2:
+	if _repro.has("aim"):
+		var a := String(_repro.aim).split_floats(",")
+		if a.size() == 2:
+			return Vector2(a[0], a[1])
+	return _vcur
+
+## One use of the tool at what the mouse points at: a rock is bitten into (loses its shell, then breaks);
+## otherwise the ground is dug. `place`: put stone there instead. Returns a short description.
+func _use_tool(place: bool) -> String:
+	var t: Dictionary = aim.target
+	if t.kind == "none" or not t.in_reach:
+		return "out of reach" if t.kind != "none" else "nothing"
+	if place:
+		world.fill(t.point + t.normal * 1.2, 1.8, BlockTypes.STONE)
+		return "placed"
+	if t.kind == "rock":
+		var res := world.hit_rock(t)
+		var n: int = {"hit": 2, "shed": 7, "broken": 11}[res.event]
+		n = int(n * (1.0 + t.rock.size))              # a big rock throws more pieces
+		debris.burst(t.point, t.normal, res.colors, n, 0.10 + 0.07 * t.rock.size)
+		return "%s %s (%d units)" % [res.event, res.type, res.units]
+	world.carve(t.point, 2.4)
+	_ground_debris(t.point)
+	return "dug"
+
+## Pieces of ground flying off where the terrain is dug (they vanish; the dug hole is the real change).
+func _ground_debris(p: Vector3) -> void:
+	var d := p.normalized()
+	var col := Column.new()
+	gen.sample_column(d, col)
+	var alt := p.length() - R
+	var ground_col: Color = gen.surface.color_for(col) if alt > col.height - 3.0 else BlockTypes.COLORS[BlockTypes.STONE]
+	debris.burst(p, d, [ground_col, ground_col.darkened(0.2), BlockTypes.COLORS[BlockTypes.STONE]], 6, 0.16)
+
 ## [C]: move to the floor of the nearest cave (open or closed; this becomes the respawn point too).
 ## Shift+C: the nearest sinkhole floor (a shaft open to the sky).
 func _spawn_in_cave() -> void:
@@ -295,6 +401,11 @@ func _spawn_in_cave() -> void:
 	player.respawn()
 	_hole = 0.0
 
+func _harvest_text() -> String:
+	if world.rocks.inventory.is_empty():
+		return ""
+	return "Harvest\n" + world.rocks.inventory_text() + "\n"
+
 func _unhandled_input(event: InputEvent) -> void:
 	if event is InputEventKey and event.pressed and not event.echo:
 		match event.physical_keycode:
@@ -303,16 +414,23 @@ func _unhandled_input(event: InputEvent) -> void:
 			KEY_C: _spawn_in_cave()
 			KEY_ESCAPE:
 				Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+	elif event is InputEventMouseMotion and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED and not _repro.has("aim"):
+		# the cursor roams inside the action perimeter; what would take it beyond the edge turns the camera
+		var vsize := get_viewport().get_visible_rect().size
+		var centre := vsize * 0.5
+		var radius := vsize.y * PERIMETER
+		var np: Vector2 = _vcur + event.relative
+		var off: Vector2 = np - centre
+		if off.length() > radius:
+			var edge: Vector2 = centre + off.normalized() * radius
+			cam.turn(np - edge)                  # only the outward push
+			np = edge
+			_pushing = true
+		_vcur = np
 	elif event is InputEventMouseButton and event.pressed:
-		if Input.mouse_mode != Input.MOUSE_MODE_CAPTURED:
-			Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
+		if Input.mouse_mode == Input.MOUSE_MODE_VISIBLE:
+			Input.mouse_mode = Input.MOUSE_MODE_CAPTURED           # back into the game (this click does nothing else)
 			return
-		if event.button_index == MOUSE_BUTTON_LEFT or event.button_index == MOUSE_BUTTON_RIGHT:
-			var origin := cam.global_position
-			var dir := -cam.global_transform.basis.z
-			var hit := world.raycast(origin, dir, REACH + cam.distance)
-			if hit.hit:
-				if event.button_index == MOUSE_BUTTON_LEFT:
-					world.carve(hit.point, 2.4)
-				else:
-					world.fill(hit.prev, 1.8, BlockTypes.STONE)
+		if event.button_index == MOUSE_BUTTON_RIGHT:
+			aim.pick(cam, world, player.global_position, _vcur)
+			_use_tool(true)                                          # place stone where the tool points

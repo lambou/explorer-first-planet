@@ -18,6 +18,9 @@ var hlat := PackedFloat32Array()       # terrain height lattice (ocean depth)
 var l0 := Vector3i.ZERO
 var water_instance: MeshInstance3D
 var skirt_instance: MeshInstance3D   # hairline-crack hiders: no shadows, no collision
+var rocks: Array = []                 # the rocks lying in this chunk (RockInst), natural ones minus the broken ones
+var rock_instance: MeshInstance3D     # all of them baked into one mesh
+var rock_body: StaticBody3D           # and one collision trimesh
 
 func rebuild(material: Material) -> void:
 	apply_mesh(ChunkMesher.build(dens, colr, coord * WorldConfig.CHUNK_SIZE, 1, skirt, base), material)
@@ -77,6 +80,39 @@ func apply_mesh(res: Dictionary, material: Material) -> void:
 			skirt_instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 			mesh_instance.add_child(skirt_instance)
 		skirt_instance.mesh = sm
+
+## Shows the baked rocks of this chunk (one mesh, one collision shape).
+func apply_rocks(res: Dictionary, material: Material) -> void:
+	var verts: PackedVector3Array = res.verts
+	if verts.is_empty():
+		if rock_instance:
+			rock_instance.queue_free()
+			rock_instance = null
+		if rock_body:
+			rock_body.queue_free()
+			rock_body = null
+		return
+	var arrays := []
+	arrays.resize(Mesh.ARRAY_MAX)
+	arrays[Mesh.ARRAY_VERTEX] = verts
+	arrays[Mesh.ARRAY_NORMAL] = res.normals
+	arrays[Mesh.ARRAY_COLOR] = res.colors
+	var m := ArrayMesh.new()
+	m.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+	if rock_instance == null:
+		rock_instance = MeshInstance3D.new()
+		rock_instance.material_override = material
+		add_child(rock_instance)
+	rock_instance.mesh = m
+	if collide:
+		var shape := ConcavePolygonShape3D.new()
+		shape.backface_collision = true
+		shape.set_faces(res.faces)
+		if rock_body == null:
+			rock_body = StaticBody3D.new()
+			rock_body.add_child(CollisionShape3D.new())
+			add_child(rock_body)
+		(rock_body.get_child(0) as CollisionShape3D).shape = shape
 
 func rebuild_water(material: Material) -> void:
 	if wlev.is_empty() and water_instance == null:

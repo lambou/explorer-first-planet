@@ -20,14 +20,18 @@ func _ready() -> void:
 func _unhandled_input(event: InputEvent) -> void:
 	if locked:
 		return
-	if event is InputEventMouseMotion and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED:
-		_yaw_input -= event.relative.x * 0.003
-		pitch = clampf(pitch + event.relative.y * 0.003, -0.2, 1.4)
-	elif event is InputEventMouseButton and event.pressed and event.ctrl_pressed:   # Ctrl + wheel = camera distance (plain wheel zooms the radar)
+	if event is InputEventMouseButton and event.pressed and event.ctrl_pressed:   # Ctrl + wheel = camera distance (plain wheel zooms the radar)
 		if event.button_index == MOUSE_BUTTON_WHEEL_UP:
 			distance = maxf(3.0, distance - 0.7)
 		elif event.button_index == MOUSE_BUTTON_WHEEL_DOWN:
 			distance = minf(30.0, distance + 0.7)
+
+## Turn the camera by a mouse push (pixels): main calls this with what goes beyond the action perimeter.
+func turn(push: Vector2) -> void:
+	if locked:
+		return
+	_yaw_input -= push.x * 0.003
+	pitch = clampf(pitch + push.y * 0.003, -0.2, 1.4)
 
 func _process(_delta: float) -> void:
 	if target == null:

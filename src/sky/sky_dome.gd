@@ -106,6 +106,20 @@ static func create() -> Sky:
 	sky.radiance_size = Sky.RADIANCE_SIZE_256
 	return sky
 
+## The spin angle of the sun (the `sun_angle` of main.gd: the sun direction is (cos d cos a, sin d, cos d sin a)) that puts
+## it at elevation sine `elevation` (0.18 = about 10 degrees) as seen from a place with local up `up`, on a day when the
+## sun's declination is `declination` (radians). `rising`: the sun is on its way up (morning), not down (evening).
+## Returns the angle in radians. If the sun never gets that high there (polar night) it takes the highest it reaches.
+static func sun_angle_for_elevation(up: Vector3, declination: float, elevation: float, rising: bool = true) -> float:
+	var rho := Vector2(up.x, up.z).length()
+	var phi := atan2(up.z, up.x)
+	if rho < 0.0001:
+		return 0.0
+	# elevation(a) = cos(decl) * rho * cos(a - phi) + sin(decl) * up.y
+	var c := (elevation - sin(declination) * up.y) / (cos(declination) * rho)
+	var off := acos(clampf(c, -1.0, 1.0))
+	return phi - off if rising else phi + off
+
 ## Sine of the elevation of the geometric horizon seen from distance `radius` from the planet's centre: the
 ## sea's edge lies BELOW eye level by acos(R / r) when you are above sea level (13.6 deg at +147 m here).
 static func horizon_sine(radius: float) -> float:

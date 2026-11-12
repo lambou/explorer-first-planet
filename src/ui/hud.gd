@@ -4,6 +4,7 @@ extends CanvasLayer
 
 var _label: Label
 var radar: Radar
+var aim_overlay: AimOverlay
 
 func _ready() -> void:
 	var panel := PanelContainer.new()
@@ -19,10 +20,8 @@ func _ready() -> void:
 	add_child(panel)
 	radar = Radar.new()
 	add_child(radar)
-	var cross := Label.new()
-	cross.text = "+"
-	cross.set_anchors_and_offsets_preset(Control.PRESET_CENTER)
-	add_child(cross)
+	aim_overlay = AimOverlay.new()
+	add_child(aim_overlay)
 
 func set_text(t: String) -> void:
 	_label.text = t

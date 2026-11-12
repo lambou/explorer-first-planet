@@ -22,6 +22,8 @@ const UPDATE_DIST := 6.0          # re-evaluate which chunks are needed when the
 var gen: PlanetGenerator
 var material: ShaderMaterial
 var water: WaterSystem
+var rocks: RockSystem
+signal terrain_edited(center: Vector3, radius: float)     # the ground changed here: loose rocks next to it may lose their support
 var underground := false          # the player is below the ground surface
 var sky_open := 1.0               # 0..1: how much of the sky the player can see (underground only meaningful)
 var enclosed := false             # underground and no sky in sight: the outside world does not exist here
@@ -55,6 +57,8 @@ func setup(p_gen: PlanetGenerator) -> void:
 	material = TerrainMaterial.create()
 	water = WaterSystem.new()
 	water.setup(p_gen, WorldConfig.world_seed)
+	rocks = RockSystem.new()
+	rocks.setup(p_gen, WorldConfig.world_seed)
 
 # ---------- coordinates ----------
 static func chunk_of(sp: Vector3i) -> Vector3i:
@@ -358,6 +362,8 @@ func _process(_delta: float) -> void:
 					um = ChunkMesher.build(old.dens, old.colr, c * S, 1, old.skirt, old.base)
 				old.apply_mesh(um, material)
 				old.apply_water(r.wmesh if r.rev == edit_rev else WaterMesher.build(old.wlev, old.dens, c, old.hlat, old.l0), water.material)
+				old.rocks = r.rocks
+				old.apply_rocks(r.rmesh, material)
 			continue
 		if chunks.has(c) or not _wanted.has(c):
 			continue
@@ -382,6 +388,8 @@ func _process(_delta: float) -> void:
 		chunks[c] = ch
 		ch.apply_mesh(mesh, material)
 		ch.apply_water(r.wmesh if r.rev == edit_rev else WaterMesher.build(ch.wlev, ch.dens, c, ch.hlat, ch.l0), water.material)
+		ch.rocks = r.rocks
+		ch.apply_rocks(r.rmesh, material)
 	water.tick(chunks, _last_pos, _has_pos, edit_rev)
 	_pump()
 
@@ -392,17 +400,20 @@ func _pump() -> void:
 			continue
 		jobs[c] = true
 		var caves := underground and (_in_zone(c) or _vis_extra.has(c))
-		WorkerThreadPool.add_task(_job.bind(c, _snapshot_edits(c), edit_rev, not caves, caves))
+		WorkerThreadPool.add_task(_job.bind(c, _snapshot_edits(c), edit_rev, not caves, caves, rocks.broken_snapshot()))
 
-func _job(c: Vector3i, snap: Dictionary, rev: int, skirt: bool, caves: bool) -> void:
+func _job(c: Vector3i, snap: Dictionary, rev: int, skirt: bool, caves: bool, broken: Dictionary) -> void:
 	var f := gen.fill_chunk(c, Column.new(), 0, caves)
+	if caves:
+		rocks.carve_chunk(c, f.dens)           # pockets of the buried rocks (natural: part of the base density)
 	var base: PackedFloat32Array = f.dens.duplicate()
 	_overlay(f.dens, f.colr, c, snap)
 	var mesh := ChunkMesher.build(f.dens, f.colr, c * S, 1, skirt, base)
 	var wmesh := WaterMesher.build(f.wlev, f.dens, c, f.hlat, f.l0)
+	var rk := rocks.build_chunk(c, base, f.wlev, f.dens, broken, caves)
 	_mutex.lock()
 	_done.append({"coord": c, "dens": f.dens, "colr": f.colr, "base": base, "mesh": mesh, "rev": rev, "skirt": skirt, "caves": caves,
-			"wlev": f.wlev, "hlat": f.hlat, "l0": f.l0, "wmesh": wmesh})
+			"wlev": f.wlev, "hlat": f.hlat, "l0": f.l0, "wmesh": wmesh, "rocks": rk.rocks, "rmesh": rk.mesh})
 	_mutex.unlock()
 
 func _snapshot_edits(c: Vector3i) -> Dictionary:
@@ -513,6 +524,7 @@ func _edit_sphere(center: Vector3, radius: float, carving: bool, mat: int) -> vo
 	for c in touched:
 		(chunks[c] as Chunk).rebuild(material)
 		(chunks[c] as Chunk).rebuild_water(water.material)
+	terrain_edited.emit(center, radius)
 
 func _current_sample(sp: Vector3i) -> Vector2:
 	var cc := chunk_of(sp)
@@ -550,6 +562,7 @@ func _ensure_chunk(c: Vector3i) -> Chunk:
 	if jobs.has(c):
 		return null  # in flight: result is re-overlaid with edits when it arrives
 	var f := gen.fill_chunk(c, Column.new(), 0, true)
+	rocks.carve_chunk(c, f.dens)
 	var base: PackedFloat32Array = f.dens.duplicate()
 	_overlay(f.dens, f.colr, c, _snapshot_edits(c))
 	var ch := Chunk.new()
@@ -565,7 +578,32 @@ func _ensure_chunk(c: Vector3i) -> Chunk:
 	add_child(ch)
 	chunks[c] = ch
 	_wanted[c] = true
+	var rk := rocks.build_chunk(c, base, f.wlev, f.dens, rocks.changed, true)
+	ch.rocks = rk.rocks
+	ch.apply_rocks(rk.mesh, material)
 	return ch
+
+## Re-bake the rocks of one chunk after its rock list changed (a rock fell out, or landed in).
+func rebake_rocks(ch: Chunk) -> void:
+	ch.apply_rocks(RockMesher.bake(ch.rocks, rocks.catalog, ch.position, ch.dens, ch.base), material)
+
+## A rock came to rest: it joins the chunk it lies in (if that chunk is built; otherwise it is added when it is).
+func place_rock(r: RockInst) -> void:
+	var ch: Chunk = chunks.get(world_to_chunk(r.pos))
+	if ch != null:
+		ch.rocks.append(r)
+		rebake_rocks(ch)
+
+## The nearest rock on a ray (see RockSystem.ray_rocks): {hit, rock, chunk, t, point}.
+func rock_ray(origin: Vector3, dir: Vector3, max_dist: float) -> Dictionary:
+	return RockSystem.ray_rocks(chunks, origin, dir.normalized(), max_dist)
+
+## One blow on the rock found by rock_ray; the chunk's rock mesh is re-baked (a few hundred triangles).
+func hit_rock(res: Dictionary, power: float = 1.0) -> Dictionary:
+	var ch: Chunk = res.chunk
+	var out := rocks.hit(res.rock, ch.rocks, power, res.point)
+	ch.apply_rocks(RockMesher.bake(ch.rocks, rocks.catalog, ch.position, ch.dens, ch.base), material)
+	return out
 
 ## Ray march against the density field. Returns {hit, point, prev}.
 func raycast(origin: Vector3, dir: Vector3, max_dist: float) -> Dictionary:
