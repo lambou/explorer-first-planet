@@ -16,6 +16,8 @@ var _goal := Vector2.ZERO       # the view found by the search: (raise, swing)
 var _has_goal := false
 var _search_cd := 0.0
 var view_fwd := Vector3.FORWARD  # the direction the camera really looks along (the top of the screen): the controls and the radar follow it
+var tilt := 0.0                 # the view tilted UP from the ball (looking at the sky and the treetops); the camera itself stays low
+const MAX_TILT := 1.45
 const MAX_PITCH := 1.55         # straight down, almost
 const UNDERGROUND_MAX := 7.0
 
@@ -37,7 +39,16 @@ func turn(push: Vector2) -> void:
 	if locked:
 		return
 	_yaw_input -= push.x * 0.003
-	pitch = clampf(pitch + push.y * 0.003, -0.2, 1.4)
+	# push down = the camera rises over the ball; push up = it sinks to ground level and then the VIEW tilts up to the sky
+	var np := pitch + push.y * 0.003
+	if push.y < 0.0 and np < -0.2:
+		tilt = clampf(tilt + (-0.2 - np), 0.0, MAX_TILT)
+		np = -0.2
+	elif push.y > 0.0 and tilt > 0.0:
+		var used := minf(tilt, push.y * 0.003)
+		tilt -= used
+		np = pitch + (push.y * 0.003 - used)
+	pitch = clampf(np, -0.2, 1.4)
 
 func _process(delta: float) -> void:
 	if target == null:
@@ -93,6 +104,14 @@ func _process(delta: float) -> void:
 	else:
 		global_position = pos
 		look_at(pivot, look_up)
+		if tilt > 0.001:
+			# tilt the view up: rotate the look direction about the camera's right axis (the ball slides down the screen)
+			var f := -global_transform.basis.z
+			var right := global_transform.basis.x
+			var f2 := f.rotated(right, tilt)
+			if f2.dot(up) < f.dot(up):
+				f2 = f.rotated(right, -tilt)
+			look_at(pos + f2 * 10.0, up)
 	# the ball would fill the screen when the camera is this close
 	if target is Node3D:
 		(target as Node3D).visible = reach > 0.45          # the ball stays visible unless the camera is practically inside it

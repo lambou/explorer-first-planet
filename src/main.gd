@@ -15,6 +15,8 @@ var cam: OrbitCamera
 var hud: Hud
 var debris: RockDebris
 var physics: RockPhysics
+var tree_fall: TreePhysics
+var far_trees: FarTrees
 var aim: ToolAim
 var _tool_cd := 0.0           # seconds until the tool may strike again while the button is held
 var _vcur := Vector2.ZERO      # the tool's cursor (viewport pixels): moves inside the action perimeter, pushes the camera at its edge
@@ -58,6 +60,14 @@ func _ready() -> void:
 	physics.world = world
 	add_child(physics)
 	world.terrain_edited.connect(physics.after_edit)      # digging: loose rocks next to it may fall
+	far_trees = FarTrees.new()
+	far_trees.setup(gen, world.trees.field)
+	add_child(far_trees)
+	tree_fall = TreePhysics.new()
+	tree_fall.world = world
+	add_child(tree_fall)
+	world.terrain_edited.connect(tree_fall.after_edit)    # digging: trees whose ground is gone fall
+	tree_fall.landed.connect(_on_tree_landed)
 	far = FarTerrain.new()
 	add_child(far)
 	far.setup(gen, world.water)
@@ -110,8 +120,12 @@ func _apply_repro() -> void:
 			player.position = Vector3(v[0], v[1], v[2])
 			player.spawn_pos = player.position
 	cam.locked = _repro.has("pos")
+	if _repro.has("wind"):
+		world.grass.forced_wind = float(_repro.wind)
 	if _repro.has("reach"):
 		aim.reach = float(_repro.reach)
+	if _repro.has("tilt"):
+		cam.tilt = deg_to_rad(float(_repro.tilt))
 	if _repro.has("pitch"):
 		cam.pitch = deg_to_rad(float(_repro.pitch))
 	if _repro.has("dist"):
@@ -251,6 +265,14 @@ func _process(delta: float) -> void:
 		var worst := -9.0
 		for off in [Vector3.ZERO, cb.x * 0.35, -cb.x * 0.35, cb.y * 0.25, -cb.y * 0.25, -cb.z * 0.3]:
 			worst = maxf(worst, world.density_at(cam.global_position + off + (-cb.z) * cam.near))
+		# debugging aid: how far is the ball's surface inside the ground? (density at 14 points of its 0.5 m sphere; > 0 = inside)
+		var ball_p := player.global_position
+		var bworst := -9.0
+		var bcentre := world.density_at(ball_p)
+		for dv in [Vector3.UP, Vector3.DOWN, Vector3.LEFT, Vector3.RIGHT, Vector3.FORWARD, Vector3.BACK, Vector3(1, 1, 1).normalized(), Vector3(-1, 1, 1).normalized(), Vector3(1, -1, 1).normalized(), Vector3(-1, -1, 1).normalized(), Vector3(1, 1, -1).normalized(), Vector3(-1, 1, -1).normalized(), Vector3(1, -1, -1).normalized(), Vector3(-1, -1, -1).normalized()]:
+			bworst = maxf(bworst, world.density_at(ball_p + dv * 0.5))
+		print("RENDER primitives %d, draw calls %d, objects %d, frame %.1f ms, fps %d" % [Performance.get_monitor(Performance.RENDER_TOTAL_PRIMITIVES_IN_FRAME), Performance.get_monitor(Performance.RENDER_TOTAL_DRAW_CALLS_IN_FRAME), Performance.get_monitor(Performance.RENDER_TOTAL_OBJECTS_IN_FRAME), Performance.get_monitor(Performance.TIME_PROCESS) * 1000.0, Performance.get_monitor(Performance.TIME_FPS)])
+		print("BALL centre density %.2f, worst surface point %.2f  %s" % [bcentre, bworst, "PARTLY IN THE GROUND" if bworst > 0.25 and bcentre < 0.0 else ("buried" if bcentre >= 0.0 else "ok")])
 		print("CAMERA density (worst of centre and near-plane corners): %.2f  %s   ball %.1f m above ground" % [worst, "INSIDE GROUND" if worst > 0.0 else "ok", player.global_position.length() - R - _col.height])
 		get_viewport().get_texture().get_image().save_png(String(_repro.shot))
 		get_tree().quit()
@@ -307,6 +329,8 @@ func _process(delta: float) -> void:
 
 	# water: the state of the sea here, and the camera under the surface (all in src/water/)
 	world.water.update_state(player.global_position, Time.get_ticks_msec() / 1000.0)
+	far_trees.update(player.global_position, delta)          # the far forest: flat cards beyond the streamed chunks
+	world.grass.update(Time.get_ticks_msec() / 1000.0, player.global_position)       # the wind and the player, shared by all grass
 	# a camera hugging the water surface would clip the nearest bit of the surface (near plane) and see through
 	# it: the closer to the surface, the smaller the near plane (0.3 m normally, down to 0.04 m)
 	cam.near = clampf(absf(cam_sub) * 0.7, 0.04, 0.3)
@@ -315,6 +339,10 @@ func _process(delta: float) -> void:
 	env.fog_sky_affect = 1.0
 	if not UnderwaterEffect.apply(env, sun, cam_sub, day):
 		UnderwaterEffect.reset(sun, env)
+	# trees between the camera and the player fade out (dithered), and so does a crown the camera is inside
+	RenderingServer.global_shader_parameter_set("tree_cam", Vector4(cam.global_position.x, cam.global_position.y, cam.global_position.z, 2.4))
+	RenderingServer.global_shader_parameter_set("tree_target", Vector4(player.global_position.x, player.global_position.y, player.global_position.z, 0.0))
+	world.grass.set_light(sd, sun.light_color, sun.light_energy, env.ambient_light_energy)    # the grass is lit by hand with what the sun and the water just ended up with
 
 	if _repro.has("nofar"):
 		far.visible = false
@@ -497,6 +525,13 @@ func _use_tool(place: bool) -> String:
 	if place:
 		world.fill(t.point + t.normal * 1.2, 1.8, BlockTypes.STONE)
 		return "placed"
+	if t.kind == "tree":
+		var tres := world.hit_tree(t, player.global_position)
+		var tn: int = {"hit": 3, "fell": 6, "chop": 8, "gone": 10}[tres.event]
+		debris.burst(t.point, t.normal, tres.colors, tn, 0.09 + 0.05 * t.tree.trunk_r)
+		if tres.event == "fell":
+			tree_fall.start_fall(t.tree, t.chunk, tres.dir)
+		return "%s %s (%d units)" % [tres.event, tres.wood, tres.units]
 	if t.kind == "rock":
 		var res := world.hit_rock(t)
 		var n: int = {"hit": 2, "shed": 7, "broken": 11}[res.event]
@@ -529,9 +564,13 @@ func _spawn_in_cave() -> void:
 	_hole = 0.0
 
 func _harvest_text() -> String:
-	if world.rocks.inventory.is_empty():
+	if world.rocks.inventory.is_empty() and world.trees.inventory.is_empty():
 		return ""
-	return "Harvest\n" + world.rocks.inventory_text() + "\n"
+	return "Harvest\n" + world.rocks.inventory_text() + world.trees.inventory_text() + "\n"
+
+## A felled tree hit the ground: its crown bursts into leaves.
+func _on_tree_landed(_tree: TreeInst, point: Vector3, colors: Array) -> void:
+	debris.burst(point, point.normalized(), colors, 28, 0.2)
 
 func _unhandled_input(event: InputEvent) -> void:
 	if event is InputEventKey and event.pressed and not event.echo:

@@ -23,6 +23,8 @@ var gen: PlanetGenerator
 var material: ShaderMaterial
 var water: WaterSystem
 var rocks: RockSystem
+var grass: GrassSystem
+var trees: TreeSystem
 signal terrain_edited(center: Vector3, radius: float)     # the ground changed here: loose rocks next to it may lose their support
 var underground := false          # the player is below the ground surface
 var sky_open := 1.0               # 0..1: how much of the sky the player can see (underground only meaningful)
@@ -59,6 +61,10 @@ func setup(p_gen: PlanetGenerator) -> void:
 	water.setup(p_gen, WorldConfig.world_seed)
 	rocks = RockSystem.new()
 	rocks.setup(p_gen, WorldConfig.world_seed)
+	grass = GrassSystem.new()
+	grass.setup(p_gen, WorldConfig.world_seed)
+	trees = TreeSystem.new()
+	trees.setup(p_gen, WorldConfig.world_seed)
 
 # ---------- coordinates ----------
 static func chunk_of(sp: Vector3i) -> Vector3i:
@@ -364,6 +370,10 @@ func _process(_delta: float) -> void:
 				old.apply_water(r.wmesh if r.rev == edit_rev else WaterMesher.build(old.wlev, old.dens, c, old.hlat, old.l0), water.material)
 				old.rocks = r.rocks
 				old.apply_rocks(r.rmesh, material)
+				old.grass = r.grass
+				old.apply_grass(grass)
+				old.trees = r.trees
+				old.apply_trees(r.tmesh, trees.material, r.tfar)
 			continue
 		if chunks.has(c) or not _wanted.has(c):
 			continue
@@ -390,6 +400,10 @@ func _process(_delta: float) -> void:
 		ch.apply_water(r.wmesh if r.rev == edit_rev else WaterMesher.build(ch.wlev, ch.dens, c, ch.hlat, ch.l0), water.material)
 		ch.rocks = r.rocks
 		ch.apply_rocks(r.rmesh, material)
+		ch.grass = r.grass
+		ch.apply_grass(grass)
+		ch.trees = r.trees
+		ch.apply_trees(r.tmesh, trees.material, r.tfar)
 	water.tick(chunks, _last_pos, _has_pos, edit_rev)
 	_pump()
 
@@ -400,9 +414,9 @@ func _pump() -> void:
 			continue
 		jobs[c] = true
 		var caves := underground and (_in_zone(c) or _vis_extra.has(c))
-		WorkerThreadPool.add_task(_job.bind(c, _snapshot_edits(c), edit_rev, not caves, caves, rocks.broken_snapshot()))
+		WorkerThreadPool.add_task(_job.bind(c, _snapshot_edits(c), edit_rev, not caves, caves, rocks.broken_snapshot(), trees.changed_snapshot()))
 
-func _job(c: Vector3i, snap: Dictionary, rev: int, skirt: bool, caves: bool, broken: Dictionary) -> void:
+func _job(c: Vector3i, snap: Dictionary, rev: int, skirt: bool, caves: bool, broken: Dictionary, tsnap: Dictionary) -> void:
 	var f := gen.fill_chunk(c, Column.new(), 0, caves)
 	if caves:
 		rocks.carve_chunk(c, f.dens)           # pockets of the buried rocks (natural: part of the base density)
@@ -411,9 +425,11 @@ func _job(c: Vector3i, snap: Dictionary, rev: int, skirt: bool, caves: bool, bro
 	var mesh := ChunkMesher.build(f.dens, f.colr, c * S, 1, skirt, base)
 	var wmesh := WaterMesher.build(f.wlev, f.dens, c, f.hlat, f.l0)
 	var rk := rocks.build_chunk(c, base, f.wlev, f.dens, broken, caves)
+	var tr := trees.build_chunk(c, base, f.colr, f.wlev, f.hlat, f.l0, tsnap)
+	var gr := grass.build_chunk(c, f.dens, f.colr, f.wlev, f.hlat, f.l0, rk.rocks + tr.trees)
 	_mutex.lock()
 	_done.append({"coord": c, "dens": f.dens, "colr": f.colr, "base": base, "mesh": mesh, "rev": rev, "skirt": skirt, "caves": caves,
-			"wlev": f.wlev, "hlat": f.hlat, "l0": f.l0, "wmesh": wmesh, "rocks": rk.rocks, "rmesh": rk.mesh})
+			"wlev": f.wlev, "hlat": f.hlat, "l0": f.l0, "wmesh": wmesh, "rocks": rk.rocks, "rmesh": rk.mesh, "grass": gr, "trees": tr.trees, "tmesh": tr.mesh, "tfar": tr.far})
 	_mutex.unlock()
 
 func _snapshot_edits(c: Vector3i) -> Dictionary:
@@ -524,6 +540,8 @@ func _edit_sphere(center: Vector3, radius: float, carving: bool, mat: int) -> vo
 	for c in touched:
 		(chunks[c] as Chunk).rebuild(material)
 		(chunks[c] as Chunk).rebuild_water(water.material)
+	for c in touched:
+		grass.refilter(chunks[c] as Chunk)         # the clumps whose ground was dug away or buried disappear
 	terrain_edited.emit(center, radius)
 
 func _current_sample(sp: Vector3i) -> Vector2:
@@ -581,6 +599,11 @@ func _ensure_chunk(c: Vector3i) -> Chunk:
 	var rk := rocks.build_chunk(c, base, f.wlev, f.dens, rocks.changed, true)
 	ch.rocks = rk.rocks
 	ch.apply_rocks(rk.mesh, material)
+	var tr2 := trees.build_chunk(c, base, f.colr, f.wlev, f.hlat, f.l0, trees.changed)
+	ch.trees = tr2.trees
+	ch.apply_trees(tr2.mesh, trees.material, tr2.far)
+	ch.grass = grass.build_chunk(c, f.dens, f.colr, f.wlev, f.hlat, f.l0, rk.rocks + tr2.trees)
+	ch.apply_grass(grass)
 	return ch
 
 ## Re-bake the rocks of one chunk after its rock list changed (a rock fell out, or landed in).
@@ -593,6 +616,25 @@ func place_rock(r: RockInst) -> void:
 	if ch != null:
 		ch.rocks.append(r)
 		rebake_rocks(ch)
+
+## Re-bake the trees of one chunk after its tree list changed (a tree was cut, fell, landed or was chopped).
+func rebake_trees(ch: Chunk) -> void:
+	# a tree that is gone (chopped to nothing) leaves the list
+	for t: TreeInst in ch.trees.duplicate():
+		var st = trees.changed.get(t.id)
+		if st is bool and st:
+			ch.trees.erase(t)
+	ch.apply_trees(TreeMeshes.bake(ch.trees, trees.catalog, ch.position, 0), trees.material, TreeMeshes.bake(ch.trees, trees.catalog, ch.position, 1))
+
+## The nearest trunk on a ray (see TreeSystem.ray_trees).
+func tree_ray(origin: Vector3, dir: Vector3, max_dist: float) -> Dictionary:
+	return TreeSystem.ray_trees(chunks, origin, dir.normalized(), max_dist)
+
+## One blow on the trunk found by tree_ray; the chunk's tree mesh is re-baked (notch, chopped length).
+func hit_tree(res: Dictionary, from: Vector3) -> Dictionary:
+	var out := trees.hit(res, from)
+	rebake_trees(res.chunk)
+	return out
 
 ## The nearest rock on a ray (see RockSystem.ray_rocks): {hit, rock, chunk, t, point}.
 func rock_ray(origin: Vector3, dir: Vector3, max_dist: float) -> Dictionary:

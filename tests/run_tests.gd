@@ -296,6 +296,9 @@ func _init() -> void:
 	_rock_break_tests()
 	_rock_deposit_tests()
 	_rock_gravity_tests()
+	_ball_ground_tests()
+	_grass_tests()
+	_tree_tests()
 
 	print("failures: ", failures)
 	quit(failures)
@@ -1202,6 +1205,401 @@ func dest_rocks_of(w: VoxelWorld, c: Vector3i) -> Array:
 	var ch: Chunk = w.chunks.get(c)
 	return ch.rocks if ch != null else []
 
+func _ball_ground_tests() -> void:
+	print("== ball: never partly in the ground ==")
+	var g := PlanetGenerator.new(1337)
+	var w := VoxelWorld.new()
+	w.setup(g)
+	var sp := g.find_spawn()
+	var cc := VoxelWorld.world_to_chunk(sp)
+	for dz in range(-1, 2):
+		for dy in range(-1, 2):
+			for dx in range(-1, 2):
+				w._ensure_chunk(cc + Vector3i(dx, dy, dz))
+	var b := BallPlayer.new()
+	b.world = w
+	b.freeze = true                              # no physics of its own in this test: only the guard is called
+	var up := sp.normalized()
+	var col := Column.new()
+	g.sample_height(up, col)
+	var surf := up * (5120.0 + col.height)
+	b.position = surf + up * 0.1                 # the ball's lowest 0.4 m are in the ground
+	var inside0 := w.density_at(b.position - up * 0.5)
+	for i in 12:
+		b._keep_out_of_ground()
+	var worst := -9.0
+	for dir in BallPlayer.SURFACE_PROBES:
+		worst = maxf(worst, w.density_at(b.position + dir * BallPlayer.RADIUS))
+	print("  ball sunk 0.25 m: its lowest point was %.2f inside, after the guard the worst surface point is %.2f" % [inside0, worst])
+	check(worst <= BallPlayer.TOLERANCE + 0.05, "a ball that is partly in the ground is pushed out of it")
+	check(b.position.distance_to(surf) < 1.0, "it is lifted a little, not thrown away")
+	var air := surf + up * 3.0
+	b.position = air
+	b._keep_out_of_ground()
+	check(b.position.distance_to(air) < 0.0001, "a ball in the air is not touched")
+	var deep := surf - up * 6.0
+	b.position = deep
+	b._keep_out_of_ground()
+	check(b.position.distance_to(deep) < 0.0001, "a buried ball is not moved (no rescue)")
+	b.free()
+	w.free()
+
+func _grass_tests() -> void:
+	print("== grass ==")
+	var g := PlanetGenerator.new(1337)
+	var cat := GrassCatalog.new(1337)
+	check(cat.types.size() == 8 and cat.get_type("meadow") != null and cat.get_type("seagrass").underwater, "the catalog has meadow, tall, tuft, dry and sea grass")
+	var cat2 := GrassCatalog.new(1337)
+	var cat3 := GrassCatalog.new(99)
+	check(cat.get_type("meadow").tip_color == cat2.get_type("meadow").tip_color, "the same seed gives the same palette")
+	check(cat.get_type("meadow").tip_color != cat3.get_type("meadow").tip_color, "another seed gives its own shade of green")
+	var tris_ok := true
+	var uv_ok := true
+	for t in cat.types:
+		for v in GrassCatalog.VARIANTS:
+			var m := GrassMeshes.build(t, v, 1337)
+			var n := GrassMeshes.triangle_count(m)
+			if n < 15 or n > (80 if t.flower else 40):
+				tris_ok = false
+			for uv in (m.surface_get_arrays(0)[Mesh.ARRAY_TEX_UV] as PackedVector2Array):
+				if uv.y < 0.0 or uv.y > 1.0:
+					uv_ok = false
+	check(tris_ok, "every clump is between 15 and 40 triangles (80 for flowers: stem plus five petals)")
+	check(uv_ok, "the position along the blade (UV.y) is 0..1 on every vertex")
+	var field := GrassField.new(cat, 1337)
+	check(GrassField.grassiness(GrassField.GRASS_GREEN) > 0.95, "the grass green is grassy ground")
+	check(GrassField.grassiness(BlockTypes.COLORS[BlockTypes.SAND]) < 0.05 and GrassField.grassiness(BlockTypes.COLORS[BlockTypes.SNOW]) < 0.05, "sand and snow grow no grass")
+	check(GrassField.grassiness(BlockTypes.COLORS[BlockTypes.STONE]) < 0.05, "bare rock grows no grass")
+	var seen := {}
+	for i in 400:
+		var d := PlanetGenerator.fibonacci_dir(i, 400) * 5200.0
+		var pick := field.choose(GrassField.GRASS_GREEN, 0.3 + 0.6 * float(i % 7) / 7.0, 0.3 + 0.5 * float(i % 5) / 5.0, d, 0.1, float(i % 11) / 11.0)
+		if pick.x >= 0.0:
+			seen[cat.by_id(int(pick.x)).key] = true
+	print("  kinds that grow on green ground over many places: ", seen.keys())
+	check(seen.size() >= 3, "several kinds of grass grow depending on the place and the climate")
+	var sand := Color(0.8, 0.7, 0.5)
+	check(field.sea_density(0.2, sand, Vector3(5100, 0, 0), 0.1) == 0.0 and field.sea_density(60.0, sand, Vector3(5100, 0, 0), 0.1) == 0.0, "sea grass needs water 0.6 to 24 m deep")
+	var sp := g.find_spawn()
+	var cc := VoxelWorld.world_to_chunk(sp)
+	var gs := GrassSystem.new()
+	gs.setup(g, 1337)
+	var f := g.fill_chunk(cc, Column.new(), 0, false)
+	var t0 := Time.get_ticks_usec()
+	var a := gs.build_chunk(cc, f.dens, f.colr, f.wlev, f.hlat, f.l0, [])
+	var us := Time.get_ticks_usec() - t0
+	var b2 := gs.build_chunk(cc, f.dens, f.colr, f.wlev, f.hlat, f.l0, [])
+	var total := 0
+	var same := a.size() == b2.size()
+	var on_ground := true
+	for tid in a:
+		total += int(a[tid].count)
+		if not b2.has(tid) or b2[tid].buf != a[tid].buf:
+			same = false
+		var buf: PackedFloat32Array = a[tid].buf
+		for i in int(a[tid].count):
+			var o := i * GrassPlacer.STRIDE
+			var lp := Vector3(buf[o + 3], buf[o + 7], buf[o + 11])
+			var upv := Vector3(buf[o + 1], buf[o + 5], buf[o + 9]).normalized()
+			if ChunkSampler.density(f.dens, lp - upv * 0.3) <= 0.0:
+				on_ground = false
+	print("  chunk at the spawn: %d clumps of %d kinds, planted in %.2f ms" % [total, a.size(), us / 1000.0])
+	check(total > 20, "a meadow chunk gets its grass")
+	check(same, "the same chunk always has the same grass")
+	check(on_ground, "every clump stands on solid ground")
+	check(us < 12000, "planting a chunk is cheap (< 12 ms on the worker thread)")
+	var w := VoxelWorld.new()
+	w.setup(g)
+	var ch := w._ensure_chunk(cc)
+	var before := 0
+	for tid in ch.grass:
+		before += int(ch.grass[tid].count)
+	w.carve(sp - sp.normalized() * 3.5, 4.0)       # the spawn is 4 m above the ground: dig a ball of 4 m radius into it
+	var after := 0
+	for tid in ch.grass:
+		after += int(ch.grass[tid].count)
+	print("  digging at the spawn: %d -> %d clumps in its chunk" % [before, after])
+	check(before > 0 and after < before, "digging removes the grass whose ground is gone")
+	w.free()
+
+func _tree_tests() -> void:
+	print("== trees ==")
+	var g := PlanetGenerator.new(1337)
+	var cat := TreeCatalog.new(1337)
+	var fams := {}
+	for t in cat.types:
+		fams[t.family] = true
+	print("  %d species in %d canopy families: %s" % [cat.types.size(), fams.size(), fams.keys()])
+	check(fams.size() >= 6, "the catalog has at least six canopy families (broadleaf, round, birch, pine, fir, palm, acacia)")
+	check(cat.get_type("exotic_0") != null and cat.get_type("exotic_0").name != TreeCatalog.new(4242).get_type("exotic_0").name, "every seed invents its own species")
+	var cat2 := TreeCatalog.new(1337)
+	check(cat.get_type("oak").leaf_a == cat2.get_type("oak").leaf_a, "the same seed gives the same catalog")
+	# niche: palms warm, firs cold
+	var palm := cat.get_type("palm")
+	var fir := cat.get_type("fir")
+	check(palm.niche(0.85, 0.6, 3.0, true) > 0.5 and palm.niche(0.2, 0.6, 3.0, true) < 0.05, "palms live in the warm shore, not the cold")
+	check(fir.niche(0.2, 0.7, 80.0, false) > 0.5 and fir.niche(0.9, 0.7, 80.0, false) < 0.05, "firs live in the cold, not the heat")
+	# forests: the field gives dense forests and clearings, several species over the planet
+	var ts := TreeSystem.new()
+	ts.setup(g, 1337)
+	var field := ts.field
+	var dense := 0
+	var clear := 0
+	var species := {}
+	var col := Column.new()
+	for i in 3000:
+		var d := PlanetGenerator.fibonacci_dir(i, 3000)
+		g.sample_column(d, col)
+		if col.land < 0.05 or col.height < 3.0:
+			continue
+		var p := d * (5120.0 + col.height)
+		var f := field.forest_density(p)
+		if f > 0.8:
+			dense += 1
+		elif f < 0.05:
+			clear += 1
+		var pick := field.choose(GrassField.GRASS_GREEN, col.temperature, col.moisture, col.height, p, 0.1, float(i % 13) / 13.0)
+		if pick.x >= 0.0 and pick.y > 0.25:
+			species[cat.by_id(int(pick.x)).key] = true
+	print("  forest field: %d dense places, %d clearings; species planted: %s" % [dense, clear, species.keys()])
+	check(dense > 20 and clear > 100, "there are big dense forests and open meadows")
+	# every dense forest mixes several species: look at a 120 m disc around a few dense places
+	var mixed_ok := true
+	var forests_checked := 0
+	var dcol := Column.new()
+	for i in 6000:
+		if forests_checked >= 6:
+			break
+		var d0 := PlanetGenerator.fibonacci_dir(i, 6000)
+		g.sample_column(d0, dcol)
+		if dcol.land < 0.05 or dcol.height < 3.0:
+			continue
+		var p0 := d0 * (5120.0 + dcol.height)
+		if field.forest_density(p0) < 0.9:
+			continue
+		var tang := d0.cross(Vector3.UP).normalized()
+		var seen_sp := {}
+		for k in 60:
+			var q := (p0 + tang.rotated(d0, k * 0.7) * (k * 2.0)).normalized()
+			g.sample_column(q, dcol)
+			var pp := q * (5120.0 + dcol.height)
+			var pk := field.choose(GrassField.GRASS_GREEN, dcol.temperature, dcol.moisture, dcol.height, pp, 0.1, float(k % 9) / 9.0)
+			if pk.x >= 0.0:
+				seen_sp[int(pk.x)] = true
+		forests_checked += 1
+		if seen_sp.size() < 2:
+			mixed_ok = false
+	check(forests_checked >= 3 and mixed_ok, "every dense forest mixes at least two species")
+	check(species.size() >= 4, "the climate and the provinces give several species over the planet")
+	# a forest chunk: trees stand on the ground, deterministic, in budget
+	var spot := Vector3(-997.5284, 4430.189, 2533.567)         # a dense forest on gentle ground
+	var cc := VoxelWorld.world_to_chunk(spot)
+	var best_n := 0
+	var best_c := cc
+	var best_f: Dictionary = {}
+	for dz in range(-3, 4):
+		for dx in range(-3, 4):
+			var c := cc + Vector3i(dx, 0, dz)
+			var f := g.fill_chunk(c, Column.new(), 0, false)
+			var trees := TreePlacer.place(g, field, c, f.dens, f.colr, f.wlev, f.hlat, f.l0)
+			if trees.size() > best_n:
+				best_n = trees.size()
+				best_c = c
+				best_f = f
+	print("  densest of 49 chunks around the forest: %d trees" % best_n)
+	check(best_n >= 10, "a dense forest chunk holds many trees")
+	var t0 := Time.get_ticks_usec()
+	var a := TreePlacer.place(g, field, best_c, best_f.dens, best_f.colr, best_f.wlev, best_f.hlat, best_f.l0)
+	var us := Time.get_ticks_usec() - t0
+	var b2 := TreePlacer.place(g, field, best_c, best_f.dens, best_f.colr, best_f.wlev, best_f.hlat, best_f.l0)
+	var same := a.size() == b2.size()
+	for i in a.size():
+		if same and (a[i].id != b2[i].id or a[i].pos != b2[i].pos or a[i].type_id != b2[i].type_id):
+			same = false
+	var origin := Vector3(best_c * 16)
+	var inside := true
+	var grounded := true
+	for tr: TreeInst in a:
+		var lp := tr.pos - origin
+		if lp.x < 0.0 or lp.y < 0.0 or lp.z < 0.0 or lp.x >= 16.0 or lp.y >= 16.0 or lp.z >= 16.0:
+			inside = false
+		if ChunkSampler.density(best_f.dens, lp - tr.up * 0.3) <= 0.0:
+			grounded = false
+	check(same, "the same chunk always has the same trees")
+	check(inside and grounded, "every tree stands inside its chunk on solid ground")
+	check(us < 8000, "planting a forest chunk is cheap (%.1f ms)" % (us / 1000.0))
+	# the baked mesh: every family, budget, winding
+	var tris_ok := true
+	var winding_ok := true
+	for ty in cat.types:
+		var ti := TreeInst.new()
+		ti.type_id = ty.id
+		ti.up = Vector3.UP
+		ti.height = ty.h_mid()
+		ti.trunk_r = ti.height * ty.trunk_ratio
+		ti.canopy_r = ti.height * ty.canopy_ratio
+		ti.shape = 77 + ty.id
+		var m := TreeMeshes.bake_one(ti, cat)
+		var n := (m.verts as PackedVector3Array).size() / 3
+		if n < 30 or n > 900:
+			tris_ok = false
+		print("    %-10s %-9s %3d triangles" % [ty.key, ty.family, n])
+		var vv: PackedVector3Array = m.verts
+		for i in range(0, vv.size(), 3):
+			var cr := (vv[i + 1] - vv[i]).cross(vv[i + 2] - vv[i])
+			if cr.dot((m.normals as PackedVector3Array)[i]) > 0.0:
+				winding_ok = false
+	check(tris_ok, "every tree is between 30 and 900 triangles")
+	check(winding_ok, "tree triangles are clockwise from outside")
+	# cutting: a notch deepens with every blow, the last blow fells it
+	var tr0: TreeInst = null
+	for tr: TreeInst in a:
+		if tr.height > 9.0:
+			tr0 = tr
+			break
+	if tr0 == null:
+		tr0 = a[0]
+	var need := int(ceilf(ts.blows_to_fell(tr0)))
+	var ch := Chunk.new()
+	ch.position = origin
+	ch.trees = [tr0]
+	var radius_at := func(tree: TreeInst) -> float:
+		var mm := TreeMeshes.bake_one(tree, ts.catalog)
+		var best := 0.0                              # how far the trunk reaches towards the player at the notch height
+		for v in (mm.verts as PackedVector3Array):
+			if absf(v.dot(tree.up) - tree.hit_h) < 0.12:
+				best = maxf(best, v.dot(tree.hit_dir))
+		return best
+	var events: Array = []
+	var depth_first := -1.0
+	var depth_mid := -1.0
+	for i in need + 2:
+		var res := {"tree": tr0, "chunk": ch, "point": tr0.pos + tr0.up * 1.2 + Vector3.RIGHT * tr0.trunk_r}
+		var r := ts.hit(res, tr0.pos - Vector3.RIGHT * 4.0)
+		events.append(r.event)
+		if i == 0:
+			depth_first = radius_at.call(tr0)
+		if i == need / 2:
+			depth_mid = radius_at.call(tr0)
+		if r.event == "fell":
+			break
+	print("  tree %.0f m, trunk %.2f m: %d blows to fell; notch depth at blow 1 %.2f m, halfway %.2f m (trunk radius %.2f m)" % [tr0.height, tr0.trunk_r, need, depth_first, depth_mid, tr0.trunk_r])
+	check(events[events.size() - 1] == "fell" and events.size() == need, "the tree falls exactly on its last blow (%d blows)" % need)
+	check(depth_mid < depth_first - 0.02 and depth_mid < tr0.trunk_r * 0.85, "the notch gets deeper with every blow")
+	var thick := TreeInst.new()
+	thick.type_id = cat.get_type("oak").id
+	thick.trunk_r = 0.9
+	var thin := TreeInst.new()
+	thin.type_id = cat.get_type("oak").id
+	thin.trunk_r = 0.15
+	check(ts.blows_to_fell(thick) > ts.blows_to_fell(thin) * 8.0, "a thick old trunk takes way more blows than a sapling")
+	# lying and chopping: log by log, the last blow takes the last piece
+	ts.landed(tr0, Vector3(1, 0, 0).cross(tr0.up).cross(tr0.up).normalized())
+	check(tr0.state == TreeInst.FALLEN and tr0.remaining > 5.0, "a felled tree lies as a trunk")
+	var chops := 0
+	var last := ""
+	var wood0: int = ts.inventory.get(ts.wood_name(tr0), 0)
+	while chops < 80:
+		var r2 := ts.hit({"tree": tr0, "chunk": ch, "point": tr0.pos + tr0.axis * 1.0 + tr0.up}, tr0.pos)
+		chops += 1
+		last = r2.event
+		if r2.event == "gone":
+			break
+	print("  the lying trunk (%.1f m) takes %d blows to harvest, ends with '%s', wood %d -> %d" % [tr0.length, chops, last, wood0, ts.inventory.get(ts.wood_name(tr0), 0)])
+	check(last == "gone" and ts.changed.get(tr0.id) == true, "the last blow takes the last piece and the trunk is gone for good")
+	check(ts.inventory.get(ts.wood_name(tr0), 0) > wood0 + 3, "chopping gives wood")
+	# persistence: a rebuilt chunk keeps cut and fallen trees as they are
+	var other: TreeInst = a[1] if a.size() > 1 and a[1].id != tr0.id else a[0]
+	other.hits = 3.0
+	ts.changed[other.id] = other.to_state()
+	var rebuilt := ts.build_chunk(best_c, best_f.dens, best_f.colr, best_f.wlev, best_f.hlat, best_f.l0, ts.changed_snapshot())
+	var gone_ok := true
+	var hits_ok := false
+	for rt: TreeInst in rebuilt.trees:
+		if rt.id == tr0.id:
+			gone_ok = false
+		if rt.id == other.id and rt.hits == 3.0:
+			hits_ok = true
+	check(gone_ok and hits_ok, "a rebuilt chunk leaves the chopped tree gone and keeps the other one's notch")
+	ch.free()
+	# a trunk is closed at the foot (a felled tree is seen from below): a downward-facing cap of SIDES triangles at height 0
+	var cap_ti := TreeInst.new()
+	cap_ti.type_id = cat.get_type("oak").id
+	cap_ti.up = Vector3.UP
+	cap_ti.height = 12.0
+	cap_ti.trunk_r = 0.4
+	cap_ti.canopy_r = 3.5
+	cap_ti.shape = 5
+	var cap_m := TreeMeshes.bake_one(cap_ti, cat)
+	var caps := 0
+	var cv: PackedVector3Array = cap_m.verts
+	for i in range(0, cv.size(), 3):
+		if absf(cv[i].y) < 0.01 and absf(cv[i + 1].y) < 0.01 and absf(cv[i + 2].y) < 0.01:
+			caps += 1
+	check(caps >= TreeMeshes.SIDES, "the trunk is closed at its foot (%d cap triangles)" % caps)
+	# digging the ground away from under a tree makes it fall; a tree next to the hole stays
+	var wd := VoxelWorld.new()
+	wd.setup(g)
+	root.add_child(wd)
+	var sp2 := Vector3(-997.5284, 4430.189, 2533.567)
+	var cc2 := VoxelWorld.world_to_chunk(sp2)
+	var victim: TreeInst = null
+	var neighbour: TreeInst = null
+	for dz in range(-2, 3):
+		for dx in range(-2, 3):
+			var chd := wd._ensure_chunk(cc2 + Vector3i(dx, 0, dz))
+			if chd == null:
+				continue
+			for tt: TreeInst in chd.trees:
+				if tt.state == TreeInst.STANDING and victim == null:
+					victim = tt
+	if victim != null:
+		var tp := TreePhysics.new()
+		tp.world = wd
+		root.add_child(tp)
+		wd.terrain_edited.connect(tp.after_edit)
+		for chd2 in wd.chunks.values():
+			for tt2: TreeInst in (chd2 as Chunk).trees:
+				if tt2 != victim and tt2.state == TreeInst.STANDING and tt2.pos.distance_to(victim.pos) > 7.0 and neighbour == null:
+					neighbour = tt2
+		wd.carve(victim.pos - victim.up * 0.5, 2.6)
+		print("  dug under a tree: falling now = %d, state %d" % [tp.active(), victim.state])
+		check(victim.state == TreeInst.FALLING and tp.active() >= 1, "a tree whose ground is dug away from under it falls")
+		if neighbour != null:
+			check(neighbour.state == TreeInst.STANDING, "a tree away from the hole keeps standing")
+		var guard := 0
+		while tp.active() > 0 and guard < 600:
+			tp._physics_process(1.0 / 60.0)
+			guard += 1
+		check(victim.state == TreeInst.FALLEN and wd.trees.changed.has(victim.id), "it lands as a lying trunk and is saved")
+		tp.queue_free()
+	wd.queue_free()
+	# the far forest: cutout cards in sectors, deterministic, each tree in exactly one sector, cheap to build
+	var ft_sector := FarTrees._sector_of(Vector3(-997.5284, 4430.189, 2533.567))
+	var t_far0 := Time.get_ticks_usec()
+	var fa := FarTrees.build_sector(g, ts.field, ft_sector)
+	var far_us := Time.get_ticks_usec() - t_far0
+	var fb := FarTrees.build_sector(g, ts.field, ft_sector)
+	var far_same: bool = fa.count == fb.count and fa.buf == fb.buf
+	var owned := true
+	for i in int(fa.count):
+		var foot := Vector3(fa.buf[i * 16 + 3], fa.buf[i * 16 + 7], fa.buf[i * 16 + 11])
+		if FarTrees._sector_of(foot) != ft_sector:
+			owned = false
+	print("  far forest sector at the dense forest: %d cards (%d triangles), built in %.1f ms" % [fa.count, fa.count * 2, far_us / 1000.0])
+	check(fa.count >= 15, "a dense forest sector holds many far trees")
+	check(far_same, "the far forest is deterministic")
+	check(owned, "every far tree belongs to exactly one sector")
+	check(far_us < 120000, "a far sector is cheap to build (on the worker thread)")
+	var fam_ok := true
+	for ty in cat.types:
+		var sid := FarTrees.silhouette_of(ty.family)
+		if sid < 0 or sid > 6:
+			fam_ok = false
+	check(fam_ok and FarTreeMaterial.CODE.contains("float shape(") and FarTreeMaterial.CODE.contains("near_end"), "every canopy family has a far silhouette, and the cards hand over to the real trees near the player")
+	# the camera fade is in the shader, the trees share the grass wind and light
+	check(TreeMaterial.CODE.contains("dither(") and TreeMaterial.CODE.contains("tree_cam") and TreeMaterial.CODE.contains("grass_wind"), "trees fade out in a dither when they block the camera, and sway with the shared wind")
+
 func _rock_break_tests() -> void:
 	print("== rocks: breaking and harvesting ==")
 	var g := PlanetGenerator.new(1337)
@@ -1363,6 +1761,13 @@ func _rock_break_tests() -> void:
 	var yaw0 := oc._yaw_input
 	oc.turn(Vector2(100, 0))
 	check(oc._yaw_input < yaw0, "a push past the perimeter turns the camera")
+	oc.pitch = 0.0
+	for i in 40:
+		oc.turn(Vector2(0, -20))                 # keep pushing up: the camera sinks to ground level, then the view tilts to the sky
+	check(oc.pitch <= -0.19 and oc.tilt > 1.0, "pushing up past ground level tilts the view up to the sky (tilt %.2f rad)" % oc.tilt)
+	for i in 60:
+		oc.turn(Vector2(0, 20))                  # pushing down brings the view back, then lifts the camera over the ball
+	check(oc.tilt == 0.0 and oc.pitch > 0.5, "pushing down levels the view first, then raises the camera")
 	oc.free()
 	# debris: pieces appear, fall, and all vanish after a couple of seconds; never more than MAX
 	var deb := RockDebris.new()

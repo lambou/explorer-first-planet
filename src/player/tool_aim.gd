@@ -76,11 +76,18 @@ func pick(cam: Camera3D, world: VoxelWorld, player_pos: Vector3, mouse: Vector2)
 	var dir := cam.project_ray_normal(mouse)
 	var ground := world.raycast(origin, dir, MAX_RAY)
 	var rock := world.rock_ray(origin, dir, MAX_RAY)
+	var tree := world.tree_ray(origin, dir, MAX_RAY)
 	var t := {"kind": "none"}
 	var gt := INF
 	if ground.hit:
 		gt = origin.distance_to(ground.point)
-	if rock.hit and rock.t <= gt + 0.3:
+	var near_t := minf(gt + 0.3, rock.t if rock.hit else INF)
+	if tree.hit and tree.t <= near_t:
+		var tr: TreeInst = tree.tree
+		t = {"kind": "tree", "point": tree.point, "normal": tree.normal, "tree": tr, "chunk": tree.chunk, "t": tree.t,
+			"radius": clampf(tree.r * 0.9, 0.25, 1.0), "in_reach": player_pos.distance_to(tree.point) <= reach,
+			"cyl_a": tree.a, "cyl_d": tree.d, "cyl_r": tree.r * 0.8, "cyl_len": tree.len}
+	elif rock.hit and rock.t <= gt + 0.3:
 		var r: RockInst = rock.rock
 		t = {"kind": "rock", "point": rock.point, "normal": rock.normal, "rock": r, "chunk": rock.chunk, "t": rock.t,
 			"radius": maxf(0.25, world.rocks.bite_radius(r)), "in_reach": player_pos.distance_to(rock.point) <= reach}
@@ -107,7 +114,7 @@ func _show(world: VoxelWorld, t: Dictionary) -> void:
 	var col := Color(1.0, 1.0, 1.0)
 	if not t.in_reach:
 		col = Color(1.0, 0.25, 0.2)
-	elif t.kind == "rock":
+	elif t.kind == "rock" or t.kind == "tree":
 		col = Color(1.0, 0.85, 0.3)
 	_fill.set_shader_parameter("col", Color(col.r, col.g, col.b, 0.20))
 	_line.set_shader_parameter("col", Color(col.r, col.g, col.b, 0.95))
@@ -127,6 +134,7 @@ func _build_patch(world: VoxelWorld, t: Dictionary) -> void:
 	var tz := tx.cross(n)
 	var rad: float = t.radius
 	var is_rock: bool = t.kind == "rock"
+	var is_tree: bool = t.kind == "tree"
 	var rock: RockInst = t.rock if is_rock else null
 	var frame := RockMesher.frame_of(rock) if is_rock else {}
 	var rings: Array = []                       # per ring: PackedVector3Array (local to the target; INF = no surface there)
@@ -135,7 +143,7 @@ func _build_patch(world: VoxelWorld, t: Dictionary) -> void:
 		for i in SEGS:
 			var a := TAU * i / SEGS
 			var p0 := centre + (tx * cos(a) + tz * sin(a)) * rad * float(RINGS[k])
-			ring.append(_on_surface(world, p0, n, rock, frame, centre))
+			ring.append(_on_cylinder(p0, t, centre) if is_tree else _on_surface(world, p0, n, rock, frame, centre))
 		rings.append(ring)
 	_imm.clear_surfaces()
 	# translucent area: a fan from the centre to the first ring, then the band to the second
@@ -171,6 +179,17 @@ func _tri(out: PackedVector3Array, a: Vector3, b: Vector3, c: Vector3) -> void:
 func _quad(out: PackedVector3Array, a: Vector3, b: Vector3, c: Vector3, d: Vector3) -> void:
 	_tri(out, a, b, c)
 	_tri(out, a, c, d)
+
+## A point of a tree trunk (a cylinder around the trunk's axis), under `p0`, lifted a little off the bark.
+func _on_cylinder(p0: Vector3, t: Dictionary, centre: Vector3) -> Vector3:
+	var a: Vector3 = t.cyl_a
+	var d: Vector3 = t.cyl_d
+	var along := clampf((p0 - a).dot(d), 0.0, float(t.cyl_len))
+	var on_axis := a + d * along
+	var out := (p0 - on_axis)
+	if out.length() < 0.001:
+		return Vector3.INF
+	return on_axis + out.normalized() * (float(t.cyl_r) + 0.03) - centre
 
 ## The point of the surface below / above `p0` (along the target's normal), as a position local to the target and lifted a
 ## little off the surface so it does not flicker against it. Vector3.INF where there is no surface to be found.
@@ -214,6 +233,12 @@ func describe(world: VoxelWorld) -> String:
 	var reach: String = "" if target.in_reach else "  (too far)"
 	if target.kind == "ground":
 		return "Target  ground%s\n" % reach
+	if target.kind == "tree":
+		var tr: TreeInst = target.tree
+		var ty := world.trees.catalog.by_id(tr.type_id)
+		if tr.state == TreeInst.FALLEN:
+			return "Target  fallen %s  %.1f m left  %.0f blows%s\n" % [ty.name, tr.remaining, ceilf(world.trees.blows_to_chop(tr) * tr.remaining / maxf(tr.length, 0.1)), reach]
+		return "Target  %s  %.0f m tall  %.0f blows left%s\n" % [ty.name, tr.height, ceilf(maxf(world.trees.blows_to_fell(tr) - tr.hits, 0.0)), reach]
 	var r: RockInst = target.rock
 	var cat := world.rocks.catalog
 	var s := "Target  %s" % cat.by_id(r.layers[0][0]).name

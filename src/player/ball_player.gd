@@ -46,6 +46,7 @@ func _ready() -> void:
 func _physics_process(_delta: float) -> void:
 	if freeze:
 		return
+	_keep_out_of_ground()
 	var up := global_position.normalized()
 	var fwd: Vector3 = cam.view_fwd if cam else Vector3.FORWARD     # the top of the screen, even when the camera swung round
 	var right := fwd.cross(up)
@@ -74,6 +75,38 @@ func _physics_process(_delta: float) -> void:
 		apply_central_force(wish.normalized() * MOVE_FORCE)
 	if Input.is_physical_key_pressed(KEY_SPACE) and in_water < 0.3 and _on_ground(up):
 		apply_central_impulse(up * JUMP_IMPULSE)
+
+## The ball must never be partly inside the ground. Fourteen points of its surface are tested against the terrain data (the
+## physics shape can lag behind an edit or a rebuilt chunk, or be tunnelled by a fast landing); the points that are inside add up
+## to a way out, and the ball is moved that way (at most 25 cm per step, so it looks like being pushed up, not a jump) and loses
+## its speed into the ground. A ball whose centre is deep in solid ground (BURIED) is left alone: nobody is rescued.
+const SURFACE_PROBES: Array[Vector3] = [Vector3(0, 1, 0), Vector3(0, -1, 0), Vector3(1, 0, 0), Vector3(-1, 0, 0), Vector3(0, 0, 1), Vector3(0, 0, -1),
+	Vector3(0.577, 0.577, 0.577), Vector3(-0.577, 0.577, 0.577), Vector3(0.577, -0.577, 0.577), Vector3(-0.577, -0.577, 0.577),
+	Vector3(0.577, 0.577, -0.577), Vector3(-0.577, 0.577, -0.577), Vector3(0.577, -0.577, -0.577), Vector3(-0.577, -0.577, -0.577)]
+const RADIUS := 0.5
+const BURIED := 0.55               # centre deeper than this inside the ground = buried by the player's own digging / filling
+const TOLERANCE := 0.12            # how far into the ground (density units, about metres) a surface point may be before it is pushed out
+
+func _keep_out_of_ground() -> void:
+	if world == null or fly:
+		return
+	var c := position                                      # the player is a direct child of the world root (at the origin): same as global
+	if world.density_at(c) >= BURIED:
+		return                                             # buried (the centre is deep in solid ground): leave it
+	var push := Vector3.ZERO
+	var deepest := 0.0
+	for dir in SURFACE_PROBES:
+		var d := world.density_at(c + dir * RADIUS)
+		if d > TOLERANCE:
+			push -= dir * (d - TOLERANCE)
+			deepest = maxf(deepest, d)
+	if deepest <= 0.0:
+		return
+	var way := push.normalized()
+	position = c + way * minf(deepest - TOLERANCE + 0.02, 0.25)
+	var into := linear_velocity.dot(-way)
+	if into > 0.0:
+		linear_velocity += way * into                      # no more speed into the ground
 
 func _on_ground(up: Vector3) -> bool:
 	var q := PhysicsRayQueryParameters3D.create(global_position, global_position - up * 0.75, 1, [get_rid()])
