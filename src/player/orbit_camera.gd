@@ -28,6 +28,9 @@ const MAX_PITCH := 1.55         # straight down, almost
 const UNDERGROUND_MAX := 7.0
 const PIVOT_HEIGHT := 0.85      # the camera looks at this height above the ball's centre: the middle of the character's body
 const GOAL_HOLD := 0.6          # seconds the plain view must stay open before a search result is dropped (no flicker at an obstacle's edge)
+const FOCUS_DEAD := 1.6         # metres the player may be from where the camera looks before it follows him
+const FOCUS_RATE := 5.0         # how fast it follows once he is further (per second)
+const FOCUS_SNAP := 25.0        # further than this (a teleport) it does not glide
 const LEAD := 2.4               # metres ahead of the character the camera looks, on open ground
 const FOLLOW := 0.8             # how much of the slope ahead the camera's pitch follows (1 = the same angle to the ground as on the flat)
 const DROP_MAX := 0.5           # (radians) facing a hill the camera drops by at most this much ...
@@ -39,6 +42,8 @@ var _slope_cd := 0.0
 var dbg := ""                  # the numbers of the last frame (debugging aid: main.gd --camtest prints them)
 var _open_t := 0.0              # how long the plain view has been open since the search found a better one
 var _reach_s := 0.0             # the arm length in use (shrinks at once when blocked, grows back smoothly)
+var _focus := Vector3.ZERO      # the point the camera orbits (follows the player loosely)
+var _focus_ready := false
 var _lead := 0.0                # the lead in use (smoothed; shrinks when the spot ahead is inside the ground)
 
 func _ready() -> void:
@@ -86,7 +91,18 @@ func _process(delta: float) -> void:
 	_update_slope(tp, up, delta, cave)
 	var base_pitch := clampf(pitch - clampf(_slope * FOLLOW, -RISE_MAX, DROP_MAX), -0.2, MAX_PITCH)     # the pitch the player chose, tilted with the ground ahead
 	var eye := tp + up * PIVOT_HEIGHT                       # the middle of the character's body: the arm always starts HERE, in the open air
-	var pivot := eye + fwd * _clear_lead(eye, delta, cave)  # what the camera looks at (ahead of the ball); the camera itself stays behind the ball
+	var focus_goal := eye + fwd * _clear_lead(eye, delta, cave)       # where the camera would look if it were rigid: a little ahead of the ball
+	# The camera does not sit rigidly on the player: it orbits a FOCUS point that follows him loosely. Inside FOCUS_DEAD of the goal the focus stays put
+	# (he can walk and jump about the screen, the picture does not bob); outside it, it is dragged along with a lag. The mouse still turns the view freely.
+	if not _focus_ready or cave or _focus.distance_to(focus_goal) > FOCUS_SNAP:
+		_focus = focus_goal                                    # first frame, a cave (tight), or he was moved far (respawn, rescue)
+		_focus_ready = true
+	else:
+		var off := _focus - focus_goal
+		if off.length() > FOCUS_DEAD:
+			off = off.normalized() * FOCUS_DEAD
+		_focus = _focus.lerp(focus_goal + off, 1.0 - exp(-delta * FOCUS_RATE))
+	var pivot := _focus                                       # what the camera orbits and looks at
 	var exclude: Array[RID] = []
 	if target is CollisionObject3D:
 		exclude.append((target as CollisionObject3D).get_rid())

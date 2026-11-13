@@ -987,6 +987,23 @@ func _camtest_step() -> void:
 	print(line + "   [" + cam.dbg + "]")
 	if _ct_t % 4 == 0:
 		get_viewport().get_texture().get_image().save_png("%s_%d_%03d.png" % [prefix, _ct_phase, _ct_t])
+	if _repro.has("walk") and _ct_phase == 2 and _ct_t > 40 * int(_repro.get("blows", 3)) + 40:
+		_ct_phase = 3                                          # the walking test: he walks forward at 4 m/s, then stops
+		_ct_t = 0
+		print("CT walk starts")
+	if _ct_phase == 3:
+		var wf := cam.view_fwd
+		wf = (wf - up * wf.dot(up)).normalized().cross(up)               # sideways: nothing in the way
+		if _ct_t < 100:
+			player.global_position += wf * (4.0 / 60.0)
+		var sp2 := cam.unproject_position(player.global_position + up * 0.8)
+		print("CT walk f%03d ball on screen at (%.0f, %.0f) of %s, cam %.1f m from him" % [_ct_t, sp2.x, sp2.y, get_viewport().get_visible_rect().size, cam.global_position.distance_to(player.global_position)])
+		if _ct_t % 10 == 0:
+			get_viewport().get_texture().get_image().save_png("%s_3_%03d.png" % [prefix, _ct_t])
+		if _ct_t > 200:
+			print("CT done")
+			get_tree().quit()
+		return
 	if (_ct_phase == 1 and _ct_t > 400) or (_ct_phase == 2 and _ct_t > 40 * int(_repro.get("blows", 3)) + 40):
 		print("CT done")
 		get_tree().quit()
