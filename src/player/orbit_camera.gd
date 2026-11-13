@@ -55,7 +55,7 @@ func _unhandled_input(event: InputEvent) -> void:
 		return
 	if event is InputEventMouseButton and event.pressed and event.ctrl_pressed:   # Ctrl + wheel = camera distance (plain wheel zooms the radar)
 		if event.button_index == MOUSE_BUTTON_WHEEL_UP:
-			distance = maxf(3.0, distance - 0.7)
+			distance = maxf(1.5, distance - 0.7)
 		elif event.button_index == MOUSE_BUTTON_WHEEL_DOWN:
 			distance = minf(30.0, distance + 0.7)
 
@@ -73,7 +73,7 @@ func turn(push: Vector2) -> void:
 		var used := minf(tilt, push.y * 0.003)
 		tilt -= used
 		np = pitch + (push.y * 0.003 - used)
-	pitch = clampf(np, -0.2, 1.4)
+	pitch = clampf(np, -0.2, MAX_PITCH)
 
 func _process(delta: float) -> void:
 	if target == null:
