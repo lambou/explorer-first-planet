@@ -30,7 +30,8 @@ var _aiming := false          # the mouse is held by the game (playing, window a
 var character: PlayerCharacter  # the explorer's looks (the ball is only his physics)
 var rig: ToolRig              # the tool in the ball's hand, animated; says when the blow lands
 var _tool_cd := 0.0           # short cooldown between strikes (guards rapid re-clicks)
-var _lmb_prev := false        # left button state last frame, for click-edge detection
+var _was_aiming := false      # the crosshair was live last frame
+var _lmb_prev := false       # left button state last frame, for click-edge detection
 var _vcur := Vector2.ZERO      # where the tool aims on screen: the crosshair, the middle of the window (--aim= moves it for tests)
 var playing := true                # false while Boot shows the loading screen: the world builds, nothing answers the player yet
 var _has_focus := true             # the window is the active one (from the focus events)
@@ -359,6 +360,10 @@ func _process(delta: float) -> void:
 	kit.update(delta)
 	# one use per click: holding the button does not repeat. The tool swings first; the world changes when it lands (_on_tool_struck)
 	var lmb := Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT)
+	# a press that began while the mouse was free (picking a tool on the belt, closing a menu, clicking back into the window) is never a swing
+	if not _was_aiming:
+		_lmb_prev = true
+	_was_aiming = aiming
 	if lmb and not _lmb_prev and aiming and _tool_cd <= 0.0 and not rig.busy:
 		if Input.is_key_pressed(KEY_SHIFT) and kit.belt.current_id() == "pickaxe":
 			_use_tool(true)                          # Shift + click: place stone where the pickaxe points (an old debug aid)
