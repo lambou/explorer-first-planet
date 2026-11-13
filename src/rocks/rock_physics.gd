@@ -24,6 +24,7 @@ const FRICTION_MU := 0.7            # grip on the ground
 const SPIN_DAMP := 3.0              # spin lost per second while touching the ground
 const ROLL_DAMP := 0.8              # speed lost per second while touching the ground
 const AIR_SPIN_DAMP := 0.1
+const SUPPORT_SKIN := 0.3           # the support test forgives a gap this small (m): generated rocks rest on slopes with a hairline gap the grass hides
 const SUPPORT_SAMPLES := 96         # outline points sampled by the support test
 const SUPPORT_POINTS := 3           # a rock holds while at least this many of its SUPPORT_SAMPLES outline points touch the ground (3 = it cannot tip)
 const SKIN := 0.06                  # contact distance (density units ~ m) inside which a point already touches
@@ -44,10 +45,10 @@ func active() -> int:
 ## the very test the falling body uses to come to rest, so a rock never falls just because a chip came off its side, and never hangs
 ## in the air either. The same rule for every rock type, loose or sunk into the floor.
 func supported(r: RockInst) -> bool:
-	return _touching(r) >= SUPPORT_POINTS
+	return _touching(r, SUPPORT_SKIN) >= SUPPORT_POINTS
 
 ## How many of the rock's outline points touch the ground (within the skin), for the pose it lies in.
-func _touching(r: RockInst) -> int:
+func _touching(r: RockInst, skin: float = SKIN) -> int:
 	var f := RockMesher.frame_of(r)
 	var n := 0
 	for i in SUPPORT_SAMPLES:                                  # dense: it runs once per blow, not once per frame (a sparse test misses a rock's real contact patch)
@@ -56,7 +57,7 @@ func _touching(r: RockInst) -> int:
 		var ph := i * 2.399963229728653
 		var w := Vector3(cos(ph) * rr, y, sin(ph) * rr)
 		var l := RockMesher.surface_radius(r, f, Vector3(w.dot(f.x), w.dot(f.y), w.dot(f.z)))
-		if world.density_at(r.pos + w * l) > -SKIN:
+		if world.density_at(r.pos + w * l) > -skin:
 			n += 1
 	return n
 

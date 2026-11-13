@@ -758,7 +758,10 @@ func _rockfall_step() -> void:
 		var best: RockInst = null
 		for c: Vector3i in world.chunks:
 			for r: RockInst in (world.chunks[c] as Chunk).rocks:
-				if r.deposit or r.fixed or r.size < want * 0.7 or r.size > want * 1.5 or r.pos.distance_to(player.global_position) > 30.0:
+				if _repro.has("layered") and r.layers.size() < 2:
+					continue
+				var lay := _repro.has("layered")                          # a layered rock is rare: any size from 0.6 m, loose or sunk
+				if r.deposit or (r.fixed and not lay) or (not lay and (r.size < want * 0.7 or r.size > want * 1.5)) or (lay and r.size < 0.6) or r.pos.distance_to(player.global_position) > 45.0:
 					continue
 				if best == null or absf(r.size - want) < absf(best.size - want):
 					best = r
@@ -793,6 +796,18 @@ func _rockfall_step() -> void:
 		rcam.current = true
 		_rf_start = best.pos
 		print("RF rock size %.2f layers %s fixed %s at %s" % [best.size, best.layers, best.fixed, best.pos])
+		var dn := best.pos.normalized()
+		var dline := ""
+		for k in [-1.5, -1.0, -0.5, 0.0, 0.5, 1.0, 1.5]:
+			dline += " %+.1f:%.2f" % [k * best.size, world.density_at(best.pos + dn * k * best.size)]
+		print("RF density along up (m from centre):", dline, "  normal.up %.2f  ground slope check" % best.normal.dot(dn))
+		var rf0 := RockMesher.frame_of(best)
+		var lows := ""
+		for dv in [-dn, -dn + rf0.x * 0.6, -dn - rf0.x * 0.6, -dn + rf0.z * 0.6, -dn - rf0.z * 0.6]:
+			var wv: Vector3 = dv.normalized()
+			var lw := RockMesher.surface_radius(best, rf0, Vector3(wv.dot(rf0.x), wv.dot(rf0.y), wv.dot(rf0.z)))
+			lows += " %.2f" % world.density_at(best.pos + wv * lw)
+		print("RF density at the 5 lowest outline points:", lows)
 		_rf_phase = 1
 		_rf_t = 0
 		return
@@ -833,8 +848,9 @@ func _rockfall_step() -> void:
 				if res.hit:
 					aim.target = {"kind": "rock", "rock": res.rock, "chunk": res.chunk, "point": res.point, "normal": res.normal, "in_reach": true}
 					_rf_blows += 1
+					var t_before: int = physics._touching(_rf_rock)
 					var out := _use_tool(false)
-					print("RF f%03d BLOW %d: %s  | left %.0f%%  bites %d  size %.2f" % [f, _rf_blows, out, RockMesher.volume_fraction(_rf_rock) * 100.0, _rf_rock.bites.size(), _rf_rock.size])
+					print("RF f%03d BLOW %d: %s  | left %.0f%%  bites %d  size %.2f  touching %d -> %d (fixed %s)" % [f, _rf_blows, out, RockMesher.volume_fraction(_rf_rock) * 100.0, _rf_rock.bites.size(), _rf_rock.size, t_before, physics._touching(_rf_rock), _rf_rock.fixed])
 				else:
 					print("RF f%03d no rock on the ray" % f)
 			if f % 30 == 20:
