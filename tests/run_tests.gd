@@ -2500,6 +2500,14 @@ func _survival_tests() -> void:
 	cm.free()
 	for id in ["pickaxe", "bucket", "torch", "torch_bundle"]:
 		check(load(ToolCatalog.get_def(id).model_path) != null, "the %s model loads" % id)
+	# every torch shows its own time over its flame
+	for id in ["torch", "torch_bundle"]:
+		var tm := (load(ToolCatalog.get_def(id).model_path) as PackedScene).instantiate() as Node3D
+		var fl := TorchFlame.attach(tm)
+		check(fl.timer != null and not fl.timer.visible, "the %s has a timer label, hidden until it burns" % id)
+		fl.flicker(0.0, 1.0, 125.0)
+		check(fl.timer.visible and fl.timer.text == "2:05" and fl.timer.position.y > 0.3, "the %s shows 2:05 above its flame" % id)
+		tm.free()
 
 ## Saving: what play changes goes to disk and comes back in a fresh game. (The save file is a test file, never the player's.)
 func _save_tests() -> void:

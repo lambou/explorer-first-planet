@@ -120,7 +120,7 @@ func _process(delta: float) -> void:
 	_model.global_transform = Transform3D(_basis(pose.h, right).scaled(Vector3.ONE * SCALE), pose.pos)
 	if _fire != null:
 		var left := kit.belt.fuel_left(_tool.id)                       # a torch nearly out burns low
-		_fire.flicker(_t, 1.0 if left < 0.0 else clampf(left / ToolCatalog.TORCH_DIM_SECONDS, 0.0, 1.0))
+		_fire.flicker(_t, 1.0 if left < 0.0 else clampf(left / ToolCatalog.TORCH_DIM_SECONDS, 0.0, 1.0), left)
 
 func _flat(v: Vector3, up: Vector3) -> Vector3:
 	var f := v - up * v.dot(up)

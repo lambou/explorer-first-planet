@@ -95,7 +95,7 @@ func _process(delta: float) -> void:
 			_remove(i)                                  # burnt down
 			burnt_out.emit()
 			continue
-		(e.flame as TorchFlame).flicker(_t, clampf(e.fuel / ToolCatalog.TORCH_DIM_SECONDS, 0.0, 1.0))
+		(e.flame as TorchFlame).flicker(_t, clampf(e.fuel / ToolCatalog.TORCH_DIM_SECONDS, 0.0, 1.0), e.fuel)
 	_check -= delta
 	if _check <= 0.0 and world != null:
 		_check = CHECK_EVERY
