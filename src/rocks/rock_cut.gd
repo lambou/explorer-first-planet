@@ -56,7 +56,9 @@ static func build(r: RockInst, catalog: RockCatalog) -> Dictionary:
 						var hh := maxf(SMOOTH - absf(d - db), 0.0) / SMOOTH
 						d = minf(d, db) - hh * hh * SMOOTH * 0.25
 				dens[i + P * (j + P * k)] = d
-	var m := _nets(dens, P, cell, reach)
+	# the planet's "up" in the rock's own frame: a tumbled rock lies in any pose, so the supported piece is the lowest ALONG THIS, not along local y
+	var wup := r.pos.normalized() if r.pos.length() > 1.0 else r.normal
+	var m := _nets(dens, P, cell, reach, Vector3(wup.dot(f.x), wup.dot(f.y), wup.dot(f.z)))
 	var out := _paint(m, r, f, catalog)
 	out["dropped"] = m.dropped                              # unsupported pieces (rock metres, own frame): see RockCut._nets
 	return out
@@ -89,7 +91,7 @@ static func _lookup(t: PackedFloat32Array, w: Vector3) -> float:
 # ---------------------------------------------------------------- Surface Nets (any grid size)
 
 ## One vertex per mixed cell (the mean of its edge crossings), one quad per sign-changing edge. Returns triangles in rock metres.
-static func _nets(dens: PackedFloat32Array, P: int, cell: float, reach: float) -> Dictionary:
+static func _nets(dens: PackedFloat32Array, P: int, cell: float, reach: float, up_local: Vector3) -> Dictionary:
 	var N := P - 1
 	var PP := P * P
 	var vert_index := PackedInt32Array()
@@ -181,7 +183,7 @@ static func _nets(dens: PackedFloat32Array, P: int, cell: float, reach: float) -
 	var low_y := {}
 	for v in vpos.size():
 		var rv := _find(parent, v)
-		low_y[rv] = minf(low_y.get(rv, INF), vpos[v].y)
+		low_y[rv] = minf(low_y.get(rv, INF), vpos[v].dot(up_local))
 	var anchor := -1
 	for root in count:
 		var cc: int = count[root]

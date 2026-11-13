@@ -16,10 +16,23 @@ const MAX_AGE := 14.0
 const SUPPORT_FRACTION := 0.28      # share of the underside samples that must touch solid ground
 const EMBED_FRACTION := 0.25        # share of the whole surface that must still touch the floor for a fixed rock to stay
 const MIN_GROUND_UP := 0.62         # the ground under a loose rock may be at most ~52 degrees steep
-const RESTITUTION := 0.25
-const FRICTION := 2.2               # velocity lost per second to rolling friction
+
+# ---- tuning of the falling body (change these to change how rocks feel) ----
+const POINTS := 20                  # contact points on the rock's real outline
+const MAX_STEP := 0.6               # a rock never moves more than this (m) in one step: it cannot tunnel through thin ground
+const MAX_PUSH := 0.4               # at most this far (m) is a rock pushed out of the ground in one step
+const BOUNCE := 0.35                # bounce of a 1 m rock (divided by 1 + size: a boulder hardly bounces)
+const BOUNCE_MIN_SPEED := 1.5       # slower impacts do not bounce at all
+const FRICTION_MU := 0.7            # grip on the ground
+const SPIN_DAMP := 3.0              # spin lost per second while touching the ground
+const ROLL_DAMP := 0.8              # speed lost per second while touching the ground
+const AIR_SPIN_DAMP := 0.1
+const REST_SPIN := 0.6              # rad/s: slower than this (and slow, and not on a steep slope) counts as resting
+const MIN_REST_UP := 0.6            # ground normal . up needed to come to rest
 
 var world: VoxelWorld
+var debris: RockDebris              # chips on a hard landing (optional)
+var _last_us := 0
 var _bodies: Array = []
 
 func active() -> int:
@@ -107,7 +120,20 @@ func start_fall(r: RockInst, ch: Chunk) -> void:
 		world.rebake_rocks(ch)
 	var copy := RockInst.from_state(r.to_state())
 	if not r.bites.is_empty():
-		copy.cut = r.cut if (not r.cut.is_empty() and r.cut_sig == r.bites.hash()) else RockCut.build(copy, world.rocks.catalog)   # a bitten rock falls as it is cut
+		# a bitten rock falls as it is cut: the shape it has now (one blow stale at most, never a wait for a new one)
+		copy.cut = r.cut if not r.cut.is_empty() else RockCut.build(copy, world.rocks.catalog)
+	# contact points: where the rock's REAL surface lies along POINTS directions (world axes, from the centre, in the pose it starts in)
+	var frame := RockMesher.frame_of(copy)
+	var pts: Array[Vector3] = []
+	var mean_r := 0.0
+	for i in POINTS:
+		var y := 1.0 - 2.0 * (i + 0.5) / POINTS
+		var rr := sqrt(maxf(0.0, 1.0 - y * y))
+		var ph := i * 2.399963229728653
+		var w := Vector3(cos(ph) * rr, y, sin(ph) * rr)
+		var l := RockMesher.surface_radius(copy, frame, Vector3(w.dot(frame.x), w.dot(frame.y), w.dot(frame.z)))
+		pts.append(w * l)
+		mean_r += l / POINTS
 	copy.pos = Vector3.ZERO
 	var baked := RockMesher.bake([copy], world.rocks.catalog, Vector3.ZERO)
 	var arrays := []
@@ -124,10 +150,19 @@ func start_fall(r: RockInst, ch: Chunk) -> void:
 	node.add_child(mi)
 	add_child(node)
 	node.global_transform = Transform3D(Basis.IDENTITY, r.pos)
-	_bodies.append({"rock": r, "node": node, "p": r.pos, "v": Vector3.ZERO, "rot": Basis.IDENTITY, "rest": 0.0, "age": 0.0,
-		"rho": maxf(r.size * 0.8, 0.1), "stuck_t": 0.0, "stuck_p": r.pos})
+	var rho := maxf(mean_r, 0.08)
+	_bodies.append({"rock": r, "node": node, "p": r.pos, "v": Vector3.ZERO, "w": Vector3.ZERO, "rot": Basis.IDENTITY, "rest": 0.0, "age": 0.0,
+		"pts": pts, "inv_i": 1.0 / (0.4 * rho * rho), "e": BOUNCE / (1.0 + r.size),     # a big rock hardly bounces
+		"fx": frame.x, "fy": frame.y, "stuck_t": 0.0, "stuck_p": r.pos, "hit_t": 0.0})
+
+func stats() -> String:
+	return "Rock physics  %d falling  %.2f ms" % [_bodies.size(), _last_us / 1000.0]
 
 func _physics_process(delta: float) -> void:
+	if _bodies.is_empty():
+		_last_us = 0
+		return
+	var t0 := Time.get_ticks_usec()
 	var dt := minf(delta, 1.0 / 30.0)
 	var i := 0
 	while i < _bodies.size():
@@ -136,54 +171,79 @@ func _physics_process(delta: float) -> void:
 			_finish(b)
 		else:
 			i += 1
+	_last_us = Time.get_ticks_usec() - t0
 
-## One step of a falling rock. Returns true when it has come to rest.
+## One step of a falling rock: a rigid body with the rock's real outline. Gravity pulls to the planet's centre; the contact points of the
+## outline that are inside the ground give ONE contact (their mean) with a normal impulse (bounce), friction and the torque that tips
+## and rolls the rock. Returns true when it has come to rest.
 func _step(b: Dictionary, dt: float) -> bool:
 	var p: Vector3 = b.p
 	var v: Vector3 = b.v
-	var rho: float = b.rho
+	var w: Vector3 = b.w
+	var rot: Basis = b.rot
+	var inv_i: float = b.inv_i
 	b.age += dt
+	b.hit_t -= dt
 	var up := p.normalized()
 	v -= up * GRAVITY * dt
+	if v.length() * dt > MAX_STEP:
+		v = v.normalized() * (MAX_STEP / dt)
 	p += v * dt
-	# probes around the sphere: push out of the ground, bounce a little, rub
+	var wl := w.length()
+	if wl > 0.0001:
+		rot = (Basis(w / wl, minf(wl * dt, 0.5)) * rot).orthonormalized()
 	up = p.normalized()
-	var t1 := up.cross(Vector3.UP if absf(up.y) < 0.95 else Vector3.RIGHT).normalized()
-	var t2 := up.cross(t1)
-	var grounded := false
-	var slope_n := up
-	for dir: Vector3 in [-up, t1, -t1, t2, -t2, up]:
-		var d := world.density_at(p + dir * rho)
-		if d <= 0.0:
-			continue
-		p -= dir * (d + 0.02)
-		var vn := v.dot(dir)
-		if vn > 0.0:
-			v -= dir * vn * (1.0 + RESTITUTION)
-		if dir == -up:
-			grounded = true
-			# the ground's normal under the rock (minus the density gradient)
-			var e := 0.4
-			var q := p - up * rho
-			var g := Vector3(world.density_at(q + Vector3(e, 0, 0)) - world.density_at(q - Vector3(e, 0, 0)),
-				world.density_at(q + Vector3(0, e, 0)) - world.density_at(q - Vector3(0, e, 0)),
-				world.density_at(q + Vector3(0, 0, e)) - world.density_at(q - Vector3(0, 0, e)))
-			if g.length() > 0.0001:
-				slope_n = (-g).normalized()
+	var csum := Vector3.ZERO
+	var n_hit := 0
+	var deep := 0.0
+	for q: Vector3 in b.pts:
+		var off := rot * q
+		var d := world.density_at(p + off)
+		if d > 0.0:
+			csum += off
+			n_hit += 1
+			deep = maxf(deep, d)
+	var grounded := n_hit > 0
+	var n := up
 	if grounded:
-		# rolling: friction eats the speed along the ground; the rock turns as it rolls
-		var vt := v - slope_n * v.dot(slope_n)
-		v -= vt * minf(FRICTION * dt, 1.0)
-		var speed := vt.length()
-		if speed > 0.05:
-			var axis := slope_n.cross(vt).normalized()
-			b.rot = Basis(axis, speed * dt / rho) * b.rot
-		var flat_enough := slope_n.dot(up) > 0.72
-		if v.length() < REST_SPEED and flat_enough:
+		var rc := csum / n_hit
+		var cp := p + rc
+		var e := 0.4
+		var g := Vector3(world.density_at(cp + Vector3(e, 0, 0)) - world.density_at(cp - Vector3(e, 0, 0)),
+			world.density_at(cp + Vector3(0, e, 0)) - world.density_at(cp - Vector3(0, e, 0)),
+			world.density_at(cp + Vector3(0, 0, e)) - world.density_at(cp - Vector3(0, 0, e)))
+		if g.length() > 0.0001:
+			n = (-g).normalized()
+		p += n * minf(deep + 0.01, MAX_PUSH)
+		var vrel := v + w.cross(rc)
+		var vn := vrel.dot(n)
+		var j := 0.0
+		if vn < 0.0:
+			var k := 1.0 + rc.cross(n).length_squared() * inv_i
+			var bounce: float = b.e if -vn > BOUNCE_MIN_SPEED else 0.0
+			j = -(1.0 + bounce) * vn / k
+			v += n * j
+			w += rc.cross(n * j) * inv_i
+			if -vn > 3.0 and b.hit_t <= 0.0:
+				b.hit_t = 0.25
+				_impact(b.rock, cp, n, -vn)
+		vrel = v + w.cross(rc)
+		var vt := vrel - n * vrel.dot(n)
+		var vtl := vt.length()
+		if vtl > 0.0001:
+			var tdir := vt / vtl
+			var kt := 1.0 + rc.cross(tdir).length_squared() * inv_i
+			var jt := minf(vtl / kt, FRICTION_MU * maxf(j, GRAVITY * dt))
+			v -= tdir * jt
+			w -= rc.cross(tdir * jt) * inv_i
+		w *= maxf(0.0, 1.0 - SPIN_DAMP * dt)
+		v *= maxf(0.0, 1.0 - ROLL_DAMP * dt)
+		if v.length() < REST_SPEED and w.length() < REST_SPIN and n.dot(up) > MIN_REST_UP:
 			b.rest += dt
 		else:
 			b.rest = 0.0
 	else:
+		w *= maxf(0.0, 1.0 - AIR_SPIN_DAMP * dt)
 		b.rest = 0.0
 	# stuck: grounded and hardly moved over the last half second (wedged in a pit, rocking): it has come to rest
 	b.stuck_t += dt
@@ -194,17 +254,32 @@ func _step(b: Dictionary, dt: float) -> bool:
 		b.stuck_p = p
 	b.p = p
 	b.v = v
-	var node: Node3D = b.node
-	node.global_transform = Transform3D(b.rot, p)
+	b.w = w
+	b.rot = rot
+	(b.node as Node3D).global_transform = Transform3D(rot, p)
 	return b.rest >= REST_TIME or b.age >= MAX_AGE
 
-## The rock comes to rest: it goes back into the chunk it lies in, upright, and its new place is stored.
+## A hard landing: chips fly, more of them for a bigger rock and a faster hit.
+func _impact(r: RockInst, point: Vector3, n: Vector3, speed: float) -> void:
+	if debris == null:
+		return
+	var col := world.rocks.catalog.by_id(r.layers[0][0]).color
+	debris.burst(point, n, [col, col.darkened(0.2)], int(clampf(speed, 3.0, 12.0) * (0.6 + r.size)), 0.07 + 0.05 * r.size)
+
+## The rock comes to rest: it goes back into the chunk it lies in, in the pose it came to rest in, and its place is stored.
+## A rock's pose is its up axis (`normal`) and its yaw, which can describe any orientation, so a rock that lies on its side keeps lying so.
 func _finish(b: Dictionary) -> void:
 	var r: RockInst = b.rock
 	var p: Vector3 = b.p
+	var rot: Basis = b.rot
 	var up := p.normalized()
-	r.pos = p - up * (0.25 * r.size)                         # a loose rock rests slightly sunk, like the ones placed at generation
-	r.normal = up
+	r.pos = p - up * (0.05 * r.size)                         # a loose rock rests very slightly sunk
+	var y := (rot * (b.fy as Vector3)).normalized()
+	var x := (rot * (b.fx as Vector3))
+	x = (x - y * x.dot(y)).normalized()
+	var ref := Vector3.RIGHT if absf(y.x) < 0.9 else Vector3.FORWARD
+	r.normal = y
+	r.yaw = y.cross(ref).normalized().signed_angle_to(x, y)
 	r.fixed = false
 	world.rocks.relocate(r)
 	world.place_rock(r)

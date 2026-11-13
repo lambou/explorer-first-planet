@@ -84,6 +84,7 @@ func _ready() -> void:
 	add_child(debris)
 	physics = RockPhysics.new()
 	physics.world = world
+	physics.debris = debris
 	add_child(physics)
 	world.rock_piece_shed.connect(physics.drop_piece)     # a rock cut in two: the unsupported piece falls
 	world.terrain_edited.connect(physics.after_edit)    # digging: loose rocks next to it may fall
@@ -542,6 +543,7 @@ func _update_hud(day: float) -> void:
 		+ "Water  %s%s\n" % [world.water.state_name(), "  (camera under)" if _under else ""]
 		+ "%s\n" % world.stats().replace("  building", " | build")
 		+ "%s\n" % far.stats().replace("  building", " | build")
+		+ "%s\n" % physics.stats()
 		+ "%s   FPS %d\n\n" % ["FLY" if player.fly else "ROLL", Engine.get_frames_per_second()]
 		+ aim.describe(world)
 		+ "[WASD] move (relative to the camera)\n[Space] jump / swim up\n[Ctrl] dive\n[F] fly\n[R] respawn\n[C] cave spawn (Shift: sinkhole)\n[mouse] look around (the cross in the middle is the tool aim)\n[LMB] use the tool   [Esc] free the mouse\n[Q] next tool   [1-9] bar slot   [Tab / I] inventory\n[T] plant a torch   [E] pick it up\n[Shift+LMB] place stone (pickaxe)\n"
