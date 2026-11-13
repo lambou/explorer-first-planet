@@ -31,6 +31,7 @@ const GOAL_HOLD := 0.6          # seconds the plain view must stay open before a
 const FOCUS_DEAD := 1.6         # metres the player may be from where the camera looks before it follows him
 const FOCUS_RATE := 5.0         # how fast it follows once he is further (per second)
 const FOCUS_SNAP := 25.0        # further than this (a teleport) it does not glide
+const CAMERA_LIFT := 0.8        # metres the camera sits higher than the plain arm puts it (the view looks down a little more)
 const LEAD := 2.4               # metres ahead of the character the camera looks, on open ground
 const FOLLOW := 0.8             # how much of the slope ahead the camera's pitch follows (1 = the same angle to the ground as on the flat)
 const DROP_MAX := 0.5           # (radians) facing a hill the camera drops by at most this much ...
@@ -131,7 +132,7 @@ func _process(delta: float) -> void:
 	view_fwd = fwd.rotated(up, _yaw_off)
 	# The camera spot is behind the ball, as far as the player chose; the way there is measured from the BODY. If something is in the way the arm
 	# shortens towards the ball (it never collapses onto the point ahead of him), at once when blocked and growing back smoothly.
-	var spot := pivot + back * dist
+	var spot := pivot + back * dist + up * CAMERA_LIFT     # a little above where the plain arm would put it
 	var to_spot := spot - eye
 	var arm_len := to_spot.length()
 	var arm_dir := to_spot / maxf(arm_len, 0.001)
