@@ -824,6 +824,18 @@ func _rockfall_step() -> void:
 		if _rf_t == 40:
 			if String(_repro.get("mode", "undercut")) == "hitonly":
 				pass
+			elif String(_repro.get("mode", "undercut")) == "drop":
+				# a rock let go above the rock: it must land ON it and roll off, never sink into it (--rockcontacts=0: the control)
+				physics.rock_contacts = String(_repro.get("rockcontacts", "1")) != "0"
+				var pc := RockInst.new()
+				pc.id = 9990001
+				pc.size = 0.7
+				pc.shape = 11
+				pc.layers = [[_rf_rock.layers[0][0], 1.0]]
+				pc.pos = _rf_rock.pos + up * (_rf_rock.size * 1.1 + 2.6) + up.cross(Vector3.UP).normalized() * 0.35
+				pc.normal = up
+				physics.drop_piece(pc)
+				print("RF dropped a %.1f m rock onto the %.1f m rock" % [pc.size, _rf_rock.size])
 			elif String(_repro.get("mode", "undercut")) == "chip":
 				var side := up.cross(Vector3.UP).normalized() * 2.0
 				for tries in 60:
@@ -864,7 +876,7 @@ func _rockfall_step() -> void:
 				print("RF done after %d frames" % f)
 				get_tree().quit()
 		get_viewport().get_texture().get_image().save_png("%s_%03d.png" % [prefix, f])
-		var line := "RF f%03d  falling %d" % [f, physics.active()]
+		var line := "RF f%03d  falling %d  %.2f ms" % [f, physics.active(), physics._last_us / 1000.0]
 		for b in physics.debug_bodies():
 			line += "  | h %+.2f  v %.2f  w %.2f  contacts %d  rest %.2f" % [(b.p as Vector3).length() - _rf_start.length(), (b.v as Vector3).length(), (b.w as Vector3).length(), b.n_hit, b.rest]
 		print(line)
@@ -965,7 +977,7 @@ func _camtest_step() -> void:
 	var cres := world.raycast(cam.global_position, -cam.global_transform.basis.z, 60.0)
 	if cres.hit and _ct_t % 20 == 0:
 		print("CT marker (screen centre) lands %.2f m from the ball" % player.global_position.distance_to(cres.point))
-		print(line + "   [" + cam.dbg + "]")
+	print(line + "   [" + cam.dbg + "]")
 	if _ct_t % 4 == 0:
 		get_viewport().get_texture().get_image().save_png("%s_%d_%03d.png" % [prefix, _ct_phase, _ct_t])
 	if (_ct_phase == 1 and _ct_t > 400) or (_ct_phase == 2 and _ct_t > 40 * int(_repro.get("blows", 3)) + 40):

@@ -81,6 +81,7 @@ func _mine(t: Dictionary, from: Vector3, place: bool) -> String:
 		kit.harvester.from_rock(res)
 		if res.event != "broken":
 			physics.check_rock(t.rock, t.chunk)               # what is left must still rest on something, or it falls
+		physics.check_around(t.rock.pos, t.rock.size * 1.75 + 0.3, t.rock)      # the rocks that lay on it may have lost their support
 		return "%s %s (%d units)" % [res.event, res.type, res.units]
 	var item := kit.harvester.from_ground(t.point)
 	world.carve(t.point, ToolAim.GROUND_RADIUS)

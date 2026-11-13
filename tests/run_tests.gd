@@ -296,6 +296,7 @@ func _init() -> void:
 	_rock_break_tests()
 	_rock_deposit_tests()
 	_rock_gravity_tests()
+	_rock_contact_tests()
 	_ball_ground_tests()
 	_grass_tests()
 	_tree_tests()
@@ -1150,7 +1151,7 @@ func _rock_gravity_tests() -> void:
 				still_there = true
 		check(not still_there, "and its old chunk no longer holds it")
 		# a displaced rock that is then hit keeps its new place
-		w.rocks.hit(loose, dest_rocks_of(w, dest), 1.0)
+		w.rocks.hit(loose, dest_rocks_of(w, dest), 0.1)          # a light tap: any rock, however small, survives it
 		check((w.rocks.changed[id] as Dictionary).has("state"), "a displaced rock keeps its place when it is chipped")
 	if fixed_rock != null:
 		var upf := fixed_rock.pos.normalized()
@@ -1201,6 +1202,245 @@ func _rock_gravity_tests() -> void:
 	print("  support check of an edit: %.2f ms" % ((Time.get_ticks_usec() - t1) / 1000.0 / 10.0))
 	check((Time.get_ticks_usec() - t1) / 1000.0 / 10.0 < 8.0, "checking the rocks next to an edit is cheap (< 8 ms)")
 	ph.free()
+	w.free()
+
+## Falling rocks and felled trees meet the rocks that lie around: they bump into them and never end up inside them. Each check has a CONTROL
+## (the same scene with the contacts off) so the test proves it can see the difference. Cost is measured too.
+func _rock_contact_tests() -> void:
+	print("== rocks: bumping into each other, trees against rocks ==")
+	var g := PlanetGenerator.new(1337)
+	var w := VoxelWorld.new()
+	w.setup(g)
+	var sp := g.find_spawn()
+	var cc := VoxelWorld.world_to_chunk(sp)
+	for dz in range(-2, 3):
+		for dy in range(-2, 3):
+			for dx in range(-2, 3):
+				w._ensure_chunk(cc + Vector3i(dx, dy, dz))
+	var ph := RockPhysics.new()
+	ph.world = w
+	var cat := w.rocks.catalog
+	# a sturdy rock lying on the ground, well clear of its neighbours, to drop things on
+	var base_rock: RockInst = null
+	var base_ch: Chunk = null
+	for c: Vector3i in w.chunks:
+		var ch: Chunk = w.chunks[c]
+		for r: RockInst in ch.rocks:
+			if base_rock == null and not r.fixed and not r.deposit and r.size >= 0.9 and r.size <= 3.0 and r.bites.is_empty() and ph.supported(r) \
+					and RockContact.nearby(w, r.pos, r.size * 1.75 + 1.5, r).is_empty():
+				base_rock = r
+				base_ch = ch
+	check(base_rock != null, "the test world has a loose rock of 1.2-2.2 m with nothing close by")
+	if base_rock == null:
+		ph.free()
+		w.free()
+		return
+	var up := base_rock.pos.normalized()
+	var ca := {"r": base_rock, "f": RockMesher.frame_of(base_rock)}
+	# ---- the questions RockContact answers
+	var fb: Dictionary = ca.f
+	var w_up := Vector3(up.dot(fb.x), up.dot(fb.y), up.dot(fb.z))
+	var top_r := RockMesher.surface_radius(base_rock, fb, w_up)
+	check(RockContact.depth(ca, base_rock.pos) > 0.3 * base_rock.size, "a point at the middle of a rock is deep inside it")
+	check(RockContact.depth(ca, base_rock.pos + up * (top_r + 0.3)) < -0.2, "a point 0.3 m above its top is outside (depth about -0.3)")
+	check(absf(RockContact.depth(ca, base_rock.pos + up * top_r)) < 0.06, "a point on its surface has depth 0")
+	check(RockContact.depth(ca, base_rock.pos + up * base_rock.size * 5.0) < -3.0, "a far point is far outside")
+	check(RockContact.nearby(w, base_rock.pos + up * 40.0, 3.0).is_empty() and RockContact.nearby(w, base_rock.pos, 2.0).size() >= 1, "nearby() finds the rocks around a point, and nothing where there are none")
+	var nrm := RockContact.normal(ca, base_rock.pos + up * top_r)
+	check(nrm.dot(up) > 0.3, "at the top of a rock its surface faces up")
+
+	# ---- a rock dropped on a rock stays out of it (control: with the contacts off it ends up inside)
+	var pen := {}
+	for mode in ["on", "off"]:
+		var ph2 := RockPhysics.new()
+		ph2.world = w
+		ph2.rock_contacts = (mode == "on")
+		var top := RockInst.new()
+		top.id = 7770001 if mode == "on" else 7770002
+		top.size = 0.6
+		top.shape = 99
+		top.layers = [[cat.get_type("granite").id, 1.0]]
+		top.pos = base_rock.pos + up * (top_r + 1.6) + up.cross(Vector3.UP).normalized() * 0.15
+		top.normal = up
+		ph2.drop_piece(top)
+		var steps := 0
+		while ph2.active() > 0 and steps < 900:
+			ph2._physics_process(1.0 / 60.0)
+			steps += 1
+		# how deep the dropped rock's outline lies inside the base rock where it came to rest
+		var ft := RockMesher.frame_of(top)
+		var worst := -9.0
+		for i in 48:
+			var d := PlanetGenerator.fibonacci_dir(i, 48)
+			var l := RockMesher.surface_radius(top, ft, Vector3(d.dot(ft.x), d.dot(ft.y), d.dot(ft.z)))
+			worst = maxf(worst, RockContact.depth(ca, top.pos + d * l))
+		pen[mode] = worst
+		print("  rock dropped on a rock (contacts %s): came to rest after %.1f s, deepest point %.2f m inside the other rock" % [mode, steps / 60.0, worst])
+		ph2.free()
+		if mode == "on":
+			w.rocks.changed.erase(top.id)
+			for c2: Vector3i in w.chunks:
+				(w.chunks[c2] as Chunk).rocks.erase(top)
+	check(pen.on < 0.2, "a rock dropped on a rock comes to rest OUTSIDE it (deepest point %.2f m)" % pen.on)
+	check(pen.off > 0.6, "control: without the contacts it ends up inside the rock (%.2f m deep)" % pen.off)
+
+	# ---- a rock lying on a rock is held by it; when that rock goes, it falls
+	var top2 := RockInst.new()
+	top2.id = 7770003
+	top2.size = 0.55
+	top2.shape = 5
+	top2.layers = [[cat.get_type("granite").id, 1.0]]
+	top2.pos = base_rock.pos + up * (top_r + top2.size * 0.45)
+	top2.normal = up
+	w.place_rock(top2)
+	var top2_ch: Chunk = w.chunks.get(VoxelWorld.world_to_chunk(top2.pos))
+	check(top2_ch != null and top2_ch.rocks.has(top2), "the second rock is placed on top of the first")
+	var on_rock := ph._touching(top2, RockPhysics.SUPPORT_SKIN)
+	var ground_only := 0
+	for i in RockPhysics.SUPPORT_SAMPLES:
+		var d2 := PlanetGenerator.fibonacci_dir(i, RockPhysics.SUPPORT_SAMPLES)
+		var f2 := RockMesher.frame_of(top2)
+		var l2 := RockMesher.surface_radius(top2, f2, Vector3(d2.dot(f2.x), d2.dot(f2.y), d2.dot(f2.z)))
+		if w.density_at(top2.pos + d2 * l2) > -RockPhysics.SUPPORT_SKIN:
+			ground_only += 1
+	check(on_rock >= RockPhysics.SUPPORT_POINTS and ground_only < RockPhysics.SUPPORT_POINTS, "it is held by the rock under it, not by the ground (%d points on the rock, %d on the ground)" % [on_rock - ground_only, ground_only])
+	check(ph.supported(top2), "a rock lying on a rock counts as supported")
+	# the rock under it is broken away
+	var guard := 0
+	var broke := false
+	while guard < 400 and not broke:
+		var res := w.rocks.hit(base_rock, base_ch.rocks, 5.0, Vector3.INF)
+		broke = res.event == "broken"
+		guard += 1
+	check(broke and not base_ch.rocks.has(base_rock), "the rock under it is broken away")
+	var started := ph.check_around(base_rock.pos, base_rock.size * 1.75 + 0.3, base_rock)
+	check(started >= 1 and not top2_ch.rocks.has(top2), "the rock that lay on it starts to fall (%d started)" % started)
+	var st := 0
+	while ph.active() > 0 and st < 900:
+		ph._physics_process(1.0 / 60.0)
+		st += 1
+	check(ph.active() == 0 and ph.supported(top2), "and comes to rest again on the ground")
+
+	# ---- cost: many rocks falling among rocks (the worst case is the cap of 24 bodies)
+	var cost := {}
+	for mode in ["on", "off"]:
+		var phc := RockPhysics.new()
+		phc.world = w
+		phc.rock_contacts = (mode == "on")
+		var tang := up.cross(Vector3.UP).normalized()
+		var tang2 := up.cross(tang)
+		for i in 24:
+			var pc := RockInst.new()
+			pc.id = 7771000 + i + (0 if mode == "on" else 100)
+			pc.size = 0.4 + 0.1 * (i % 5)
+			pc.shape = 1000 + i
+			pc.layers = [[cat.get_type("granite").id, 1.0]]
+			var ang := TAU * i / 24.0
+			pc.pos = sp + up * 2.5 + (tang * cos(ang) + tang2 * sin(ang)) * (1.0 + 0.5 * (i % 4))
+			pc.normal = pc.pos.normalized()
+			phc.drop_piece(pc)
+		# the stepping only (landings re-bake a chunk's mesh, which is a separate cost and happens once per chunk): 150 steps of all 24 bodies
+		var bodies: Array = phc.debug_bodies().duplicate()
+		var t_us := 0
+		var worst_us := 0
+		for st2 in 150:
+			var t0 := Time.get_ticks_usec()
+			for bd: Dictionary in bodies:
+				phc._step(bd, 1.0 / 60.0)
+			var dtu := Time.get_ticks_usec() - t0
+			t_us += dtu
+			worst_us = maxi(worst_us, dtu)
+		cost[mode] = {"avg": t_us / 1000.0 / 150.0, "worst": worst_us / 1000.0}
+		print("  24 rocks falling among rocks (contacts %s): average %.2f ms per step of all 24, worst %.2f ms" % [mode, cost[mode].avg, cost[mode].worst])
+		phc.free()
+	check(cost.on.avg < 6.0, "24 falling rocks with contacts cost under 6 ms per step on average (%.2f ms; this is a debug build: about 4x less in the game)" % cost.on.avg)
+	check(cost.on.avg - cost["off"].avg < 3.0, "the contacts add under 3 ms to 24 falling rocks (%.2f ms against %.2f ms without)" % [cost.on.avg, cost["off"].avg])
+	check(cost.on.worst < 20.0, "and a step never spikes above 20 ms (worst %.2f ms)" % cost.on.worst)
+	# nothing near = no cost: a lone rock far from every other rock does no rock lookups at all
+	var lone := RockInst.new()
+	lone.id = 7772000
+	lone.size = 0.5
+	lone.shape = 7
+	lone.layers = [[cat.get_type("granite").id, 1.0]]
+	lone.pos = base_rock.pos + up * 60.0
+	lone.normal = up
+	var phl := RockPhysics.new()
+	phl.world = w
+	phl.drop_piece(lone)
+	phl._physics_process(1.0 / 60.0)
+	check((phl.debug_bodies()[0].cands as Array).is_empty(), "a rock falling with no rock near it has an empty obstacle list (no extra cost)")
+	phl.free()
+	ph.free()
+
+	# ---- felled trees stop against a rock in their way (control: without contacts they go through)
+	var wd := VoxelWorld.new()
+	wd.setup(g)
+	root.add_child(wd)
+	var sp2 := Vector3(-997.5284, 4430.189, 2533.567)
+	var cc2 := VoxelWorld.world_to_chunk(sp2)
+	for dz in range(-2, 3):
+		for dx in range(-2, 3):
+			wd._ensure_chunk(cc2 + Vector3i(dx, 0, dz))
+	# the two standing trees with the most room round them (a free path to fall along), at least 14 m apart
+	var cand: Array = []
+	for chd in wd.chunks.values():
+		for tt: TreeInst in (chd as Chunk).trees:
+			if tt.state != TreeInst.STANDING or tt.height < 5.0:
+				continue
+			var clear := 99.0
+			for c3: Dictionary in RockContact.nearby(wd, tt.pos, tt.height + 2.0):
+				clear = minf(clear, tt.pos.distance_to((c3.r as RockInst).pos) - (c3.r as RockInst).size * 1.75)
+			cand.append([clear, tt])
+	cand.sort_custom(func(a, b): return a[0] > b[0])
+	var picks: Array[TreeInst] = []
+	for e in cand:
+		var far := true
+		for o in picks:
+			if o.pos.distance_to((e[1] as TreeInst).pos) < 14.0:
+				far = false
+		if far and picks.size() < 2:
+			picks.append(e[1])
+	print("  trees in the test forest: %d standing; the two with most room have %.1f and %.1f m clear of rocks" % [cand.size(), cand[0][0] if cand.size() > 0 else -1.0, cand[1][0] if cand.size() > 1 else -1.0])
+	check(picks.size() == 2, "two standing trees to fell (%d found)" % picks.size())
+	if picks.size() == 2:
+		var axes := {}
+		for k in 2:
+			var tree := picks[k]
+			var mode_on := k == 0
+			for ddy in range(-1, 2):
+				for ddx in range(-1, 2):
+					for ddz in range(-1, 2):
+						wd._ensure_chunk(VoxelWorld.world_to_chunk(tree.pos) + Vector3i(ddx, ddy, ddz))       # the rock must have a chunk to lie in
+			var tp := TreePhysics.new()
+			tp.world = wd
+			tp.rock_contacts = mode_on
+			root.add_child(tp)
+			var dirv := tree.hit_dir
+			dirv = (dirv - tree.up * dirv.dot(tree.up)).normalized()
+			# a rock where the tipping trunk passes at about 45 degrees
+			var rk := RockInst.new()
+			rk.id = 7773000 + k
+			rk.size = 1.1
+			rk.shape = 3
+			rk.layers = [[wd.rocks.catalog.get_type("granite").id, 1.0]]
+			rk.pos = tree.pos + (tree.up + dirv).normalized() * tree.height * 0.5
+			rk.normal = tree.up
+			wd.place_rock(rk)
+			check(wd.chunks.has(VoxelWorld.world_to_chunk(rk.pos)) and (wd.chunks[VoxelWorld.world_to_chunk(rk.pos)] as Chunk).rocks.has(rk), "the rock in the tree's way lies in a built chunk")
+			var chk: Chunk = wd.chunks.get(VoxelWorld.world_to_chunk(tree.pos))
+			tp.start_fall(tree, chk, dirv)
+			var tsteps := 0
+			while tp.active() > 0 and tsteps < 900:
+				tp._physics_process(1.0 / 60.0)
+				tsteps += 1
+			var lean_dot := tree.axis.dot(tree.up)
+			axes[k] = lean_dot
+			print("  tree %.1f m tall falling into a rock (contacts %s): lies at %.0f degrees from upright after %.1f s" % [tree.height, "on" if mode_on else "off", rad_to_deg(acos(clampf(lean_dot, -1.0, 1.0))), tsteps / 60.0])
+			check(tree.state == TreeInst.FALLEN, "the tree lands as a lying trunk (contacts %s)" % ("on" if mode_on else "off"))
+			tp.queue_free()
+		check(axes[0] > 0.25, "with a rock in its way the trunk stops against it, leaning (%.0f degrees from upright)" % rad_to_deg(acos(clampf(axes[0], -1.0, 1.0))))
+		check(axes[1] < 0.2, "control: without the contacts it falls flat, through the rock (%.0f degrees)" % rad_to_deg(acos(clampf(axes[1], -1.0, 1.0))))
+	wd.queue_free()
 	w.free()
 
 func dest_rocks_of(w: VoxelWorld, c: Vector3i) -> Array:

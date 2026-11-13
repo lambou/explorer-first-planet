@@ -509,6 +509,32 @@ func get_density_i(sp: Vector3i) -> float:
 func density_at(p: Vector3) -> float:
 	var b := Vector3i(floori(p.x), floori(p.y), floori(p.z))
 	var f := p - Vector3(b)
+	# Fast path (nearly always): the chunk holding the cell is built, and its padded data (one cell of its neighbours all round, kept in sync by every
+	# edit) holds all 8 corners: ONE chunk lookup instead of eight. The same values as the slow path below, which the tests compare against.
+	var cc := chunk_of(b)
+	var ch: Chunk = chunks.get(cc)
+	if ch != null:
+		var d := ch.dens
+		var i0 := data_index(b - cc * S)
+		var c000 := d[i0]
+		var c100 := d[i0 + 1]
+		var c010 := d[i0 + P]
+		var c110 := d[i0 + 1 + P]
+		var c001 := d[i0 + P * P]
+		var c101 := d[i0 + 1 + P * P]
+		var c011 := d[i0 + P + P * P]
+		var c111 := d[i0 + 1 + P + P * P]
+		var x00 := lerpf(c000, c100, f.x)
+		var x10 := lerpf(c010, c110, f.x)
+		var x01 := lerpf(c001, c101, f.x)
+		var x11 := lerpf(c011, c111, f.x)
+		return lerpf(lerpf(x00, x10, f.y), lerpf(x01, x11, f.y), f.z)
+	return density_at_slow(p)
+
+## The same trilinear density, one corner at a time (works whether or not the chunks are built). Reference for the fast path.
+func density_at_slow(p: Vector3) -> float:
+	var b := Vector3i(floori(p.x), floori(p.y), floori(p.z))
+	var f := p - Vector3(b)
 	var c000 := get_density_i(b)
 	var c100 := get_density_i(b + Vector3i(1, 0, 0))
 	var c010 := get_density_i(b + Vector3i(0, 1, 0))
@@ -628,11 +654,14 @@ func rebake_rocks(ch: Chunk) -> void:
 	ch.apply_rocks(RockMesher.bake(ch.rocks, rocks.catalog, ch.position, ch.dens, ch.base), material)
 
 ## A rock came to rest: it joins the chunk it lies in (if that chunk is built; otherwise it is added when it is).
-func place_rock(r: RockInst) -> void:
+## A rock lies in the chunk it is in now. `rebake` false: the caller re-bakes (once for several rocks that land together) and gets the chunk back.
+func place_rock(r: RockInst, rebake: bool = true) -> Chunk:
 	var ch: Chunk = chunks.get(world_to_chunk(r.pos))
 	if ch != null:
 		ch.rocks.append(r)
-		rebake_rocks(ch)
+		if rebake:
+			rebake_rocks(ch)
+	return ch
 
 ## Re-bake the trees of one chunk after its tree list changed (a tree was cut, fell, landed or was chopped).
 func rebake_trees(ch: Chunk) -> void:

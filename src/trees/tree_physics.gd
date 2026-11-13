@@ -7,6 +7,7 @@ extends Node3D
 signal landed(tree: TreeInst, point: Vector3, colors: Array)
 
 const MAX_BODIES := 8
+var rock_contacts := true             # a falling tree stops against the rocks in its way (off = it goes through them: tests use it as the control)
 const MAX_ANGLE := 1.52              # radians: nearly flat
 
 var world: VoxelWorld
@@ -51,10 +52,18 @@ func _near_trunk(t: TreeInst, center: Vector3, dist: float) -> bool:
 ## Underside samples of a lying trunk (distance along it) that touch solid ground, for a foot at `foot` and direction `axis`.
 func _contacts(t: TreeInst, foot: Vector3, axis: Vector3) -> Array:
 	var out := []
+	var rocks := RockContact.nearby(world, foot + axis * (t.remaining * 0.5), t.remaining * 0.5 + 1.0)      # a trunk can lie on a rock
 	var n := maxi(2, ceili(t.remaining / 0.6))
 	for i in n + 1:
 		var s := t.remaining * i / float(n)
-		if world.density_at(foot + axis * s - t.up * 0.15) > 0.0:
+		var pt := foot + axis * s - t.up * 0.15
+		var held := world.density_at(pt) > 0.0
+		if not held:
+			for c: Dictionary in rocks:
+				if RockContact.depth(c, pt) > 0.0:
+					held = true
+					break
+		if held:
 			out.append(s)
 	return out
 
@@ -145,7 +154,8 @@ func start_fall(t: TreeInst, ch: Chunk, dir: Vector3) -> void:
 	if axis.length() < 0.01:
 		axis = t.up.cross(Vector3.RIGHT).normalized()
 	_bodies.append({"tree": t, "chunk": ch, "node": node, "dir": dir, "axis": axis, "angle": 0.04, "omega": 0.15,
-		"slow": sqrt(12.0 / maxf(t.height, 4.0)), "ty": ty})
+		"slow": sqrt(12.0 / maxf(t.height, 4.0)), "ty": ty, "lean": false,
+		"rocks": RockContact.nearby(world, t.pos, t.height + 1.0) if rock_contacts else []})      # rocks do not move while the tree falls: listed once
 
 func _physics_process(delta: float) -> void:
 	var dt := minf(delta, 1.0 / 30.0)
@@ -153,13 +163,37 @@ func _physics_process(delta: float) -> void:
 	while i < _bodies.size():
 		var b: Dictionary = _bodies[i]
 		b.omega += (3.2 * sin(b.angle) + 0.35) * b.slow * dt * 2.2
+		var before: float = b.angle
 		b.angle += b.omega * dt * b.slow * 1.3
+		if not (b.rocks as Array).is_empty() and _hits_rock(b):
+			b.angle = before                                    # the trunk met a rock: it stops against it and lies leaning on it
+			b.lean = true
 		var node: Node3D = b.node
 		node.global_transform = Transform3D(Basis(b.axis, b.angle), (b.tree as TreeInst).pos)
-		if b.angle >= MAX_ANGLE:
+		if b.lean or b.angle >= MAX_ANGLE:
 			_finish(b)
 		else:
 			i += 1
+
+## Does the trunk, tipped to its current angle, run into a rock? The trunk is tested every 0.5 m (it tapers towards the tip) against the rocks
+## listed when the tree started to fall. Cost: a few distance checks per step, a surface lookup only where a rock really is near the trunk.
+func _hits_rock(b: Dictionary) -> bool:
+	var t: TreeInst = b.tree
+	var dir_t: Vector3 = Basis(b.axis, b.angle) * t.up
+	var reach := t.height * 0.88
+	var s := 1.0
+	while s <= reach:
+		var pt := t.pos + dir_t * s
+		var rad := maxf(t.trunk_r * (1.0 - 0.55 * s / reach), 0.12)
+		for c: Dictionary in b.rocks:
+			var rk: RockInst = c.r
+			var lim := rk.size * 1.75 + rad
+			if pt.distance_squared_to(rk.pos) > lim * lim:
+				continue
+			if RockContact.depth(c, pt) > -rad * 0.5:
+				return true
+		s += 0.5
+	return false
 
 ## It lands: the lying trunk goes into the chunk (tip resting on the ground), the crown is gone in a burst of leaves.
 func _finish(b: Dictionary) -> void:
@@ -170,10 +204,13 @@ func _finish(b: Dictionary) -> void:
 	var tip := t.pos + dir * reach
 	var up := t.up
 	var axis := dir
-	var hit := world.raycast(tip + up * 25.0, -up, 60.0)
-	if hit.hit:
-		var g: Vector3 = hit.point
-		axis = ((g + up * t.trunk_r) - (t.pos + up * t.trunk_r)).normalized()
+	if b.lean:
+		axis = (Basis(b.axis, b.angle) * t.up).normalized()       # it lies as it stopped: against the rock
+	else:
+		var hit := world.raycast(tip + up * 25.0, -up, 60.0)
+		if hit.hit:
+			var g: Vector3 = hit.point
+			axis = ((g + up * t.trunk_r) - (t.pos + up * t.trunk_r)).normalized()
 	world.trees.landed(t, axis)
 	var ty := world.trees.catalog.by_id(t.type_id)
 	var burst_at := t.pos + axis * (reach * 0.8) + up * 1.0
