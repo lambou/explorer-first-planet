@@ -57,7 +57,9 @@ static func build(r: RockInst, catalog: RockCatalog) -> Dictionary:
 						d = minf(d, db) - hh * hh * SMOOTH * 0.25
 				dens[i + P * (j + P * k)] = d
 	var m := _nets(dens, P, cell, reach)
-	return _paint(m, r, f, catalog)
+	var out := _paint(m, r, f, catalog)
+	out["dropped"] = m.dropped                              # unsupported pieces (rock metres, own frame): see RockCut._nets
+	return out
 
 # ---------------------------------------------------------------- the blob table
 
@@ -173,15 +175,50 @@ static func _nets(dens: PackedFloat32Array, P: int, cell: float, reach: float) -
 		var root := _find(parent, tris[t * 3])
 		count[root] = count.get(root, 0) + 1
 		biggest = maxi(biggest, count[root])
+	# Gravity: a rock is ONE body. Of the solid pieces only the lowest one (the one that rests on the ground, local y = the ground's up) stays;
+	# every other solid piece has no support and is reported in "dropped" (its bounding sphere in rock metres) to fall as a rock of its own.
+	# Shards (too small to be a rock) just vanish. Deterministic from the bites, so nothing extra needs to be stored.
+	var low_y := {}
+	for v in vpos.size():
+		var rv := _find(parent, v)
+		low_y[rv] = minf(low_y.get(rv, INF), vpos[v].y)
+	var anchor := -1
+	for root in count:
+		var cc: int = count[root]
+		if _is_solid(cc, biggest) and (anchor < 0 or low_y[root] < low_y[anchor]):
+			anchor = root
+	var csum := {}
+	var cn := {}
+	for t in tris.size() / 3:
+		var root := _find(parent, tris[t * 3])
+		if root == anchor or not _is_solid(count[root], biggest):
+			continue
+		csum[root] = csum.get(root, Vector3.ZERO) + (vpos[tris[t * 3]] + vpos[tris[t * 3 + 1]] + vpos[tris[t * 3 + 2]]) / 3.0
+		cn[root] = cn.get(root, 0) + 1
+	var dropped: Array = []
+	var dmap := {}
+	for root in csum:
+		var c: Vector3 = csum[root] / float(cn[root])
+		dmap[root] = dropped.size()
+		dropped.append({"c": c, "r": 0.0})
 	var verts := PackedVector3Array()
 	for t in tris.size() / 3:
-		var comp: int = count[_find(parent, tris[t * 3])]
-		if float(comp) < SHARD * biggest or (comp < SHARD_MIN and comp < biggest):
+		var root := _find(parent, tris[t * 3])
+		if dmap.has(root):
+			var dd: Dictionary = dropped[dmap[root]]
+			for q in 3:
+				dd.r = maxf(dd.r, (vpos[tris[t * 3 + q]] as Vector3).distance_to(dd.c))
+			continue
+		if root != anchor:
 			continue
 		verts.append(vpos[tris[t * 3]])
 		verts.append(vpos[tris[t * 3 + 1]])
 		verts.append(vpos[tris[t * 3 + 2]])
-	return {"verts": verts, "cell": cell}
+	return {"verts": verts, "cell": cell, "dropped": dropped}
+
+## A piece of this many triangles (of `biggest`) is a solid piece of the rock, not a shard.
+static func _is_solid(comp: int, biggest: int) -> bool:
+	return float(comp) >= SHARD * biggest and (comp >= SHARD_MIN or comp == biggest)
 
 static func _find(parent: PackedInt32Array, v: int) -> int:
 	while parent[v] != v:

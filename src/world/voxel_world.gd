@@ -25,7 +25,8 @@ var water: WaterSystem
 var rocks: RockSystem
 var grass: GrassSystem
 var trees: TreeSystem
-signal terrain_edited(center: Vector3, radius: float)     # the ground changed here: loose rocks next to it may lose their support
+signal rock_piece_shed(piece: RockInst)               # a cut rock lost a piece that has nothing under it: it falls as a rock of its own
+signal terrain_edited(center: Vector3, radius: float)    # the ground changed here: loose rocks next to it may lose their support
 var underground := false          # the player is below the ground surface
 var sky_open := 1.0               # 0..1: how much of the sky the player can see (underground only meaningful)
 var enclosed := false             # underground and no sky in sight: the outside world does not exist here
@@ -671,6 +672,9 @@ var _cut_busy := {}                  # rock id -> true while a job runs
 var _cut_done: Array = []
 var _cut_mutex := Mutex.new()
 
+func refresh_cut(r: RockInst) -> void:
+	_request_cut(world_to_chunk(r.pos), r)
+
 func _request_cut(coord: Vector3i, r: RockInst) -> void:
 	if _cut_busy.has(r.id):
 		return                        # a job is running: when it returns it sees the rock changed again and asks once more
@@ -703,8 +707,41 @@ func _collect_cuts() -> void:
 					r.cut = d.cut
 					r.cut_sig = d.sig
 					rebake_rocks(ch)
+					if _shed_pieces(r, d.cut.get("dropped", [])):
+						_request_cut(d.coord, r)         # the pieces are covered by bites now: the shape is built again without them
 				else:
 					_request_cut(d.coord, r)             # struck again while it was being built
+
+const MIN_PIECE := 0.15              # a loose piece of a cut rock smaller than this (radius, m) just crumbles away
+
+## Pieces of a bitten rock that no longer touch the rest (RockCut "dropped") come off as rocks of their own and fall.
+## A bite covering each is added so the piece is gone from the rock for good (and stays gone when saved and loaded).
+func _shed_pieces(r: RockInst, dropped: Array) -> bool:
+	var any := false
+	var f := RockMesher.frame_of(r)
+	for d: Dictionary in dropped:
+		var rad: float = d.r
+		if rad < MIN_PIECE:
+			continue
+		var c: Vector3 = d.c
+		var piece := RockInst.new()
+		var wp := RockMesher.to_world(r, f, c)
+		piece.id = (r.id ^ (hash(Vector3i((c * 100.0).round())) << 24) ^ (r.bites.size() << 8)) & 0x7FFFFFFFFFFFFFFF
+		piece.pos = wp
+		piece.normal = wp.normalized()
+		piece.size = clampf(rad * 0.8, MIN_PIECE, r.size)
+		piece.yaw = fmod(absf(c.x + c.z) * 7.3, TAU)
+		piece.shape = hash(c)
+		piece.layers = [[r.layers[0][0], 1.0]]
+		piece.fixed = false
+		r.bites.append(Vector4(c.x, c.y, c.z, rad * 1.1 + 0.05))
+		if r.bites.size() > RockSystem.MAX_BITES:
+			r.bites.remove_at(0)
+		rock_piece_shed.emit(piece)
+		any = true
+	if any:
+		rocks.changed[r.id] = rocks._entry(r)
+	return any
 
 ## Ray march against the density field. Returns {hit, point, prev}.
 func raycast(origin: Vector3, dir: Vector3, max_dist: float) -> Dictionary:

@@ -7,6 +7,7 @@ extends RefCounted
 var world: VoxelWorld
 var gen: PlanetGenerator
 var debris: RockDebris
+var physics: RockPhysics
 var tree_fall: TreePhysics
 var kit: PlayerKit
 var torches: PlacedTorches
@@ -66,8 +67,8 @@ func _mine(t: Dictionary, from: Vector3, place: bool) -> String:
 		return "placed"
 	if t.kind == "tree":
 		var tres := world.hit_tree(t, from)
-		var tn: int = {"hit": 3, "fell": 6, "chop": 8, "gone": 10}[tres.event]
-		debris.burst(t.point, t.normal, tres.colors, tn, 0.09 + 0.05 * t.tree.trunk_r)
+		var tn: int = {"hit": 9, "fell": 14, "chop": 10, "gone": 14}[tres.event]
+		debris.burst(t.point, t.normal, tres.colors, tn, 0.12 + 0.08 * t.tree.trunk_r)
 		if tres.event == "fell":
 			tree_fall.start_fall(t.tree, t.chunk, tres.dir)
 		kit.harvester.from_tree(tres)
@@ -78,6 +79,8 @@ func _mine(t: Dictionary, from: Vector3, place: bool) -> String:
 		n = int(n * (1.0 + t.rock.size))              # a big rock throws more pieces
 		debris.burst(t.point, t.normal, res.colors, n, 0.10 + 0.07 * t.rock.size)
 		kit.harvester.from_rock(res)
+		if res.event != "broken":
+			physics.check_rock(t.rock, t.chunk)               # what is left must still rest on something, or it falls
 		return "%s %s (%d units)" % [res.event, res.type, res.units]
 	var item := kit.harvester.from_ground(t.point)
 	world.carve(t.point, ToolAim.GROUND_RADIUS)

@@ -88,12 +88,26 @@ func after_edit(center: Vector3, radius: float) -> int:
 				started += 1
 	return started
 
+## A rock was struck: whatever is left of it must still rest on something, or it falls (the same rule for every rock type).
+func check_rock(r: RockInst, ch: Chunk) -> bool:
+	if ch.rocks.has(r) and not supported(r):
+		start_fall(r, ch)
+		return true
+	return false
+
+## A piece that came off a rock (it has no chunk yet): it falls from where it is.
+func drop_piece(piece: RockInst) -> void:
+	start_fall(piece, null)
+
 func start_fall(r: RockInst, ch: Chunk) -> void:
 	if _bodies.size() >= MAX_BODIES:
 		_finish(_bodies[0])                                   # too many in flight: the oldest comes to rest where it is
-	ch.rocks.erase(r)
-	world.rebake_rocks(ch)
+	if ch != null:
+		ch.rocks.erase(r)
+		world.rebake_rocks(ch)
 	var copy := RockInst.from_state(r.to_state())
+	if not r.bites.is_empty():
+		copy.cut = r.cut if (not r.cut.is_empty() and r.cut_sig == r.bites.hash()) else RockCut.build(copy, world.rocks.catalog)   # a bitten rock falls as it is cut
 	copy.pos = Vector3.ZERO
 	var baked := RockMesher.bake([copy], world.rocks.catalog, Vector3.ZERO)
 	var arrays := []
@@ -194,5 +208,7 @@ func _finish(b: Dictionary) -> void:
 	r.fixed = false
 	world.rocks.relocate(r)
 	world.place_rock(r)
+	if not r.bites.is_empty():
+		world.refresh_cut(r)                                  # it lies in a new orientation: its cut shape is built again
 	(b.node as Node3D).queue_free()
 	_bodies.erase(b)

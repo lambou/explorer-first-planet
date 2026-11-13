@@ -85,7 +85,8 @@ func _ready() -> void:
 	physics = RockPhysics.new()
 	physics.world = world
 	add_child(physics)
-	world.terrain_edited.connect(physics.after_edit)      # digging: loose rocks next to it may fall
+	world.rock_piece_shed.connect(physics.drop_piece)     # a rock cut in two: the unsupported piece falls
+	world.terrain_edited.connect(physics.after_edit)    # digging: loose rocks next to it may fall
 	far_trees = FarTrees.new()
 	far_trees.setup(gen, world.trees.field)
 	add_child(far_trees)
@@ -130,6 +131,7 @@ func _ready() -> void:
 	tool_user.world = world
 	tool_user.gen = gen
 	tool_user.debris = debris
+	tool_user.physics = physics
 	tool_user.tree_fall = tree_fall
 	tool_user.kit = kit
 	torches = PlacedTorches.new()
