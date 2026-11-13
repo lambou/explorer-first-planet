@@ -12,6 +12,7 @@ var world: VoxelWorld
 var far: FarTerrain
 var player: BallPlayer
 var cam: OrbitCamera
+var rescue: PlayerRescue
 var hud: Hud
 var debris: RockDebris
 var physics: RockPhysics
@@ -145,6 +146,12 @@ func _ready() -> void:
 		kit.belt.add(id, 1, left)
 		hud.say("A torch fell: its ground was dug away"))
 	torches.burnt_out.connect(func() -> void: hud.say("A torch burnt out", UiTheme.WARN))
+	rescue = PlayerRescue.new()                          # a player lost deep inside the ground is put back on the surface above
+	rescue.player = player
+	rescue.world = world
+	rescue.gen = gen
+	add_child(rescue)
+	rescue.rescued.connect(func(depth: float) -> void: print("RESCUE moved from %d m inside the ground to %s" % [int(depth), player.global_position]); hud.say("You were %d m inside the ground: moved to the surface above" % int(depth), UiTheme.WARN))
 	tool_user.torches = torches
 
 	hud = Hud.new()

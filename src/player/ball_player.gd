@@ -73,7 +73,7 @@ func _physics_process(delta: float) -> void:
 	var wish := fwd * kz + right * kx
 	if fly:
 		var v := wish * FLY_SPEED + up * _axis(KEY_SPACE, KEY_CTRL) * FLY_SPEED
-		linear_velocity = v
+		linear_velocity = _fly_clip(v, delta)
 		return
 	# water: buoyancy lifts him to the surface, water drags, and Space swims upwards
 	in_water = 0.0
@@ -144,6 +144,27 @@ func _keep_out_of_ground() -> void:
 func _on_ground(up: Vector3) -> bool:
 	var q := PhysicsRayQueryParameters3D.create(global_position, global_position - up * 0.75, 1, [get_rid()])
 	return not get_world_3d().direct_space_state.intersect_ray(q).is_empty()
+
+## Flying never carries the body into solid ground. The step it is about to make is walked in 0.4 m strides against the terrain DATA: at FLY_SPEED a
+## step is 4 m, more than the physics shape of the ground is thick (the ball would go through the floor) and more than the chunks round him can be
+## built in time. It stops short of the ground, so he can turn and fly away, and never ends up inside it.
+const FLY_STRIDE := 0.4
+const FLY_MARGIN := 0.7            # stays this far (m) from the ground: the capsule's radius and a little more
+
+func _fly_clip(v: Vector3, delta: float) -> Vector3:
+	if world == null or v.length() < 0.01:
+		return v
+	var dir := v.normalized()
+	var dist := v.length() * delta + FLY_MARGIN
+	var mid := position + position.normalized() * CAPSULE_CENTRE         # (the player is a direct child of the world root: local = global)
+	var free := 0.0
+	var t := FLY_STRIDE
+	while t <= dist:
+		if world.density_at(mid + dir * t) > 0.0:
+			return dir * (maxf(free - FLY_MARGIN, 0.0) / delta)
+		free = t
+		t += FLY_STRIDE
+	return v
 
 func toggle_fly() -> void:
 	fly = not fly

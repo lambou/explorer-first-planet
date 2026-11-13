@@ -297,6 +297,7 @@ func _init() -> void:
 	_rock_deposit_tests()
 	_rock_gravity_tests()
 	_rock_contact_tests()
+	_player_rescue_tests()
 	_ball_ground_tests()
 	_grass_tests()
 	_tree_tests()
@@ -1441,6 +1442,78 @@ func _rock_contact_tests() -> void:
 		check(axes[0] > 0.25, "with a rock in its way the trunk stops against it, leaning (%.0f degrees from upright)" % rad_to_deg(acos(clampf(axes[0], -1.0, 1.0))))
 		check(axes[1] < 0.2, "control: without the contacts it falls flat, through the rock (%.0f degrees)" % rad_to_deg(acos(clampf(axes[1], -1.0, 1.0))))
 	wd.queue_free()
+	w.free()
+
+## A player who fell into the planet is put back on the surface; one who is merely buried (air near) is left to dig out; flying never enters the ground.
+func _player_rescue_tests() -> void:
+	print("== player: lost inside the ground, flying into the ground ==")
+	var g := PlanetGenerator.new(1337)
+	var w := VoxelWorld.new()
+	w.setup(g)
+	var sp := g.find_spawn()
+	var up := sp.normalized()
+	var cc := VoxelWorld.world_to_chunk(sp)
+	for dz in range(-2, 3):
+		for dy in range(-2, 3):
+			for dx in range(-2, 3):
+				w._ensure_chunk(cc + Vector3i(dx, dy, dz))
+	var side := up.cross(Vector3.UP).normalized()
+	# ---- who is lost
+	var lost_n := 0
+	for k in 5:
+		if PlayerRescue.is_lost(w, sp - up * 300.0 + side * (k * 7.0)):
+			lost_n += 1
+	check(lost_n >= 4, "a body 300 m inside solid ground, with no air near, is lost (%d of 5 spots)" % lost_n)
+	check(not PlayerRescue.is_lost(w, sp + up * 2.0), "standing in the open is not lost")
+	check(not PlayerRescue.is_lost(w, sp - up * 0.3), "standing on the ground is not lost")
+	# a pocket dug in deep rock: inside it is air (not lost); a body in the rock 4 m from it can dig out (not lost); 30 m from it he is lost
+	var deep := sp - up * 300.0
+	var pocket := deep + side * 40.0
+	w.carve(pocket, 3.0)
+	check(not PlayerRescue.is_lost(w, pocket), "inside a dug pocket is not lost")
+	check(not PlayerRescue.is_lost(w, pocket + side * 4.5), "buried 4.5 m from a pocket (he can dig out) is not lost")
+	check(PlayerRescue.is_lost(w, pocket + side * 30.0 - up * 5.0), "30 m from any air is lost")
+	# ---- where he is put
+	var spot := PlayerRescue.surface_spot(w, g, deep)
+	var col := Column.new()
+	g.sample_column(spot.normalized(), col)
+	var alt := spot.length() - WorldConfig.PLANET_RADIUS
+	print("  lost 300 m down: put at altitude %.1f m, the natural ground there is %.1f m" % [alt, col.height])
+	check(spot.normalized().dot(deep.normalized()) > 0.99999, "he is put on the surface straight above where he was")
+	check(w.density_at(spot) < -0.3 and w.density_at(spot + up * 2.0) < -0.3, "the spot is in open air")
+	check(alt >= maxf(col.height, 0.0) + 1.0 and alt <= maxf(col.height, 0.0) + 8.0, "and close above the ground (%.1f m above it)" % (alt - maxf(col.height, 0.0)))
+	check(not PlayerRescue.is_lost(w, spot), "he is no longer lost there")
+	# ground built up since (a hill filled where the surface was): the spot rises with it
+	var raised := sp + up * 0.0
+	w.fill(raised, 4.0, BlockTypes.STONE)
+	var spot2 := PlayerRescue.surface_spot(w, g, sp - up * 200.0)
+	check(w.density_at(spot2) < -0.3, "ground built up above the old surface: the spot still lies in air")
+	# ---- flying never enters the ground
+	var bp := BallPlayer.new()
+	bp.world = w
+	var start := sp + up * 12.0
+	bp.position = start
+	var worst := -9.0
+	var stopped := false
+	for i in 90:
+		var vdown := -bp.position.normalized() * BallPlayer.FLY_SPEED
+		var v := bp._fly_clip(vdown, 1.0 / 60.0)
+		if v.length() < 0.01:
+			stopped = true
+		bp.position += v / 60.0
+		worst = maxf(worst, w.density_at(bp.position + bp.position.normalized() * BallPlayer.CAPSULE_CENTRE))
+	var above := bp.position.length() - sp.length()
+	print("  flying straight down at %.0f m/s for 1.5 s from 12 m up: stopped %.1f m from the starting ground level, deepest density %.2f" % [BallPlayer.FLY_SPEED, above, worst])
+	check(stopped and worst < 0.0, "flying straight down at full speed stops above the ground (density at the body never above 0)")
+	var away := bp._fly_clip(bp.position.normalized() * BallPlayer.FLY_SPEED, 1.0 / 60.0)
+	check(away.length() > BallPlayer.FLY_SPEED * 0.99, "and flying away from the ground is not slowed")
+	bp.position = sp + up * 60.0
+	var along := bp._fly_clip(side * BallPlayer.FLY_SPEED, 1.0 / 60.0)
+	check(along.is_equal_approx(side * BallPlayer.FLY_SPEED), "high above the ground flying sideways is not clipped at all")
+	bp.position = sp + up * 1.2
+	var into := bp._fly_clip(-up * BallPlayer.FLY_SPEED, 1.0 / 60.0)
+	check(into.length() * (1.0 / 60.0) <= 1.0, "right above the ground a dive may move at most a metre in a step (%.2f m)" % (into.length() / 60.0))
+	bp.free()
 	w.free()
 
 func dest_rocks_of(w: VoxelWorld, c: Vector3i) -> Array:
