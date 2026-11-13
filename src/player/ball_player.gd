@@ -28,6 +28,17 @@ var grounded := false         # something solid is right under the feet (updated
 var running := false          # Shift is held
 var spawn_pos := Vector3.ZERO
 
+## Grip on slopes (adjustable: here, in Project Settings "explorer/player/stand_slope_deg" and "explorer/player/scramble_slope_deg",
+## or at launch with --slope=STAND,SCRAMBLE). Up to STAND degrees he stands still on a slope and walks or runs up it at full pace along
+## the surface; between STAND and SCRAMBLE he can only climb, slowly, and slides back when he lets go; beyond SCRAMBLE he slides.
+@export_range(10.0, 85.0, 0.5) var stand_slope_deg := 50.0
+@export_range(10.0, 89.0, 0.5) var scramble_slope_deg := 62.0
+const SCRAMBLE_SPEED := 0.35   # the share of the walking speed that a scramble keeps
+var ground_normal := Vector3.UP   # the surface under the feet (smoothed), once grounded
+var slope_deg := 0.0              # its angle from level
+var sliding := false              # on the ground, on a slope too steep to stand on or climb: he slides (the animation reads it)
+var _floor_n := Vector3.UP
+
 func _ready() -> void:
 	mass = 1.0
 	gravity_scale = 0.0
@@ -37,7 +48,9 @@ func _ready() -> void:
 	continuous_cd = true
 	var pm := PhysicsMaterial.new()
 	pm.bounce = 0.0
-	pm.friction = 0.0          # the steering decides how fast he starts and stops, not the ground's grip
+	pm.friction = 0.0          # the steering decides how fast he starts and stops, not the ground's grip (see _grip)
+	stand_slope_deg = float(ProjectSettings.get_setting("explorer/player/stand_slope_deg", stand_slope_deg))
+	scramble_slope_deg = float(ProjectSettings.get_setting("explorer/player/scramble_slope_deg", scramble_slope_deg))
 	physics_material_override = pm
 	var cs := CollisionShape3D.new()
 	var sh := CapsuleShape3D.new()
@@ -96,12 +109,12 @@ func _physics_process(delta: float) -> void:
 			apply_central_force(wish.normalized() * MOVE_FORCE * (1.7 if running else 1.0))
 	else:
 		# on land and in the air: steer the sideways speed towards what the keys ask for (up and down stay with gravity and jumps)
-		var target := wish.normalized() * top if wish.length() > 0.01 else Vector3.ZERO
-		var rate := AIR_ACCEL
-		if grounded:
-			rate = GROUND_ACCEL if wish.length() > 0.01 else GROUND_BRAKE
-		vt = vt.move_toward(target, rate * delta)
-		linear_velocity = up * vv + vt
+		if grounded and linear_velocity.dot(_floor_n) < 1.5:
+			_grip(wish, top, up, delta)
+		else:
+			var target := wish.normalized() * top if wish.length() > 0.01 else Vector3.ZERO
+			vt = vt.move_toward(target, AIR_ACCEL * delta)
+			linear_velocity = up * vv + vt
 	if Input.is_physical_key_pressed(KEY_SPACE) and in_water < 0.3 and grounded:
 		apply_central_impulse(up * JUMP_IMPULSE)
 
@@ -141,9 +154,62 @@ func _keep_out_of_ground() -> void:
 	if into > 0.0:
 		linear_velocity += way * into                      # no more speed into the ground
 
+## Walking on the ground, level or sloped. The movement follows the SURFACE (the keys' direction laid into the slope plane, same speed),
+## and where he may stand, gravity's pull down the slope is cancelled, so he stays where he stops. Steeper than that he slides.
+func _grip(wish: Vector3, top: float, up: Vector3, delta: float) -> void:
+	var n := _floor_n
+	var cosa := clampf(n.dot(up), 0.0, 1.0)
+	slope_deg = rad_to_deg(acos(cosa))
+	var hyst := -2.0 if sliding else 2.0                                  # a little hysteresis: no flicker at a limit
+	var downhill := (-up + n * n.dot(up)).normalized() if cosa < 0.999 else Vector3.ZERO     # the way a ball would roll
+	var want := wish.normalized() if wish.length() > 0.01 else Vector3.ZERO
+	var uphill_push := 0.0 if downhill == Vector3.ZERO else maxf(0.0, -want.dot(downhill))
+	var gt := -up * GRAVITY * mass
+	gt -= n * gt.dot(n)                                                    # gravity's share along the surface
+	var mode := 0                                                          # 0 stand/walk, 1 scramble, 2 slide
+	if slope_deg > stand_slope_deg + hyst:
+		mode = 1 if (slope_deg <= scramble_slope_deg + hyst and uphill_push > 0.3) else 2
+	sliding = mode == 2
+	var vn := minf(linear_velocity.dot(n), 0.0)
+	var along := linear_velocity - n * linear_velocity.dot(n)              # the speed along the surface
+	if mode == 2:
+		# nothing to hold on to: gravity takes him down; a little steering across the slope only
+		var across := want - downhill * want.dot(downhill)
+		along += across * AIR_ACCEL * 0.3 * delta
+		linear_velocity = along + n * vn
+		return
+	apply_central_force(-gt)                                               # held: nothing pulls him down the slope
+	var goal := Vector3.ZERO
+	if want != Vector3.ZERO:
+		var flat := want - n * want.dot(n)
+		if flat.length() > 0.001:
+			goal = flat.normalized() * top * (SCRAMBLE_SPEED if mode == 1 else 1.0)
+	along = along.move_toward(goal, (GROUND_ACCEL if want != Vector3.ZERO else GROUND_BRAKE) * delta)
+	linear_velocity = along + n * vn
+
+## Is something solid under the feet, and what is it like? A ray from the lower sphere's centre straight down: a flat floor is hit at the
+## sphere's radius, a slope further away (radius / cos of the slope), so the distance is judged against the slope it found: steep ground counts.
 func _on_ground(up: Vector3) -> bool:
-	var q := PhysicsRayQueryParameters3D.create(global_position, global_position - up * 0.75, 1, [get_rid()])
-	return not get_world_3d().direct_space_state.intersect_ray(q).is_empty()
+	var low := global_position + up * (CAPSULE_CENTRE - CAPSULE_HEIGHT * 0.5 + CAPSULE_RADIUS)
+	var q := PhysicsRayQueryParameters3D.create(low, low - up * 2.2, 1, [get_rid()])
+	var hit := get_world_3d().direct_space_state.intersect_ray(q)
+	if hit.is_empty():
+		sliding = false
+		slope_deg = 0.0
+		return false
+	var n: Vector3 = hit.normal
+	if n.dot(up) < 0.05:
+		sliding = false
+		return false                                         # an overhang or a wall: nothing to stand on
+	var d: float = low.distance_to(hit.position)
+	var reach := CAPSULE_RADIUS / maxf(n.dot(up), 0.25) + 0.15
+	if d > reach:
+		sliding = false
+		return false
+	_floor_n = _floor_n.slerp(n, 0.5).normalized() if _floor_n.dot(n) > 0.0 else n
+	ground_normal = _floor_n
+	slope_deg = rad_to_deg(acos(clampf(_floor_n.dot(up), 0.0, 1.0)))
+	return true
 
 ## Flying never carries the body into solid ground. The step it is about to make is walked in 0.4 m strides against the terrain DATA: at FLY_SPEED a
 ## step is 4 m, more than the physics shape of the ground is thick (the ball would go through the floor) and more than the chunks round him can be

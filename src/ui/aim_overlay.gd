@@ -7,12 +7,16 @@ extends Control
 var cursor := Vector2.ZERO
 var state := 0                       # 0 nothing under the cursor, 1 ground in reach, 2 out of reach, 3 a rock or tree in reach
 var shown := true
+var centre := Vector2.ZERO
+var radius := 0.0                    # the action perimeter (0 = none drawn)
 
 func _init() -> void:
 	mouse_filter = Control.MOUSE_FILTER_IGNORE
 	set_anchors_preset(Control.PRESET_FULL_RECT)
 
-func update_state(p_cursor: Vector2, p_state: int, p_shown: bool) -> void:
+func update_state(p_cursor: Vector2, p_state: int, p_shown: bool, p_centre: Vector2 = Vector2.ZERO, p_radius: float = 0.0) -> void:
+	centre = p_centre
+	radius = p_radius
 	cursor = p_cursor
 	state = p_state
 	shown = p_shown
@@ -21,6 +25,10 @@ func update_state(p_cursor: Vector2, p_state: int, p_shown: bool) -> void:
 func _draw() -> void:
 	if not shown:
 		return                                       # only while the game holds the mouse; never because of what is (or is not) under it
+	if radius > 0.0:
+		var n := 48
+		for i in range(0, n, 2):
+			draw_arc(centre, radius, TAU * i / n, TAU * (i + 1) / n, 4, Color(1, 1, 1, 0.22), 2.0, true)       # the perimeter: past it the mouse turns the camera
 	var col := Color(1, 1, 1, 0.95)
 	if state == 2:
 		col = Color(1.0, 0.3, 0.25, 0.95)            # out of reach

@@ -35,6 +35,7 @@ var _lmb_prev := false       # left button state last frame, for click-edge dete
 var _vcur := Vector2.ZERO      # where the tool aims on screen: the crosshair, the middle of the window (--aim= moves it for tests)
 var playing := true                # false while Boot shows the loading screen: the world builds, nothing answers the player yet
 var _has_focus := true             # the window is the active one (from the focus events)
+const PERIMETER := 0.30        # radius of the action perimeter as a fraction of the window height
 var _mouse_freed := false          # Esc: the mouse is given back until the next click
 var sun: DirectionalLight3D
 var sun_disc: MeshInstance3D
@@ -130,6 +131,11 @@ func _ready() -> void:
 	cam.current = true
 	player.cam = cam
 	player.world = world
+	if _repro.has("slope"):                              # --slope=STAND,SCRAMBLE: the steepest ground (degrees) he stands on / climbs
+		var sl := String(_repro.slope).split(",")
+		player.stand_slope_deg = float(sl[0])
+		if sl.size() > 1:
+			player.scramble_slope_deg = float(sl[1])
 
 	kit = PlayerKit.new()
 	kit.harvester.bind_world(gen, world.rocks, world.trees)
@@ -341,7 +347,10 @@ func _process(delta: float) -> void:
 		far.set_sky_cut(Vector3.ZERO, Vector3.ZERO, 0.0)
 	_frame += 1
 	var vsize := get_viewport().get_visible_rect().size
-	_vcur = _repro_mouse() if _repro.has("aim") else vsize * 0.5
+	if _repro.has("aim"):
+		_vcur = _repro_mouse()
+	elif _vcur == Vector2.ZERO:
+		_vcur = vsize * 0.5                                # the aim starts in the middle, then roams inside the action perimeter (see _input)
 	var aiming := _repro.has("aim") or held
 	_aiming = aiming
 	# the character faces where the camera faces, and his head follows how far the camera looks up or down
@@ -355,7 +364,7 @@ func _process(delta: float) -> void:
 	var cstate := 0
 	if aim.target.kind != "none":
 		cstate = 2 if not aim.target.in_reach else (3 if aim.target.kind == "rock" else 1)
-	hud.aim_overlay.update_state(_vcur, cstate, aiming)
+	hud.aim_overlay.update_state(_vcur, cstate, aiming, vsize * 0.5, vsize.y * PERIMETER)
 	_tool_cd -= delta
 	kit.update(delta)
 	# one use per click: holding the button does not repeat. The tool swings first; the world changes when it lands (_on_tool_struck)
@@ -397,6 +406,8 @@ func _process(delta: float) -> void:
 			player.linear_velocity = Vector3.ZERO
 			cam.distance = 9.0
 			print("BEHINDTREE tree %.1f m high, crown radius %.1f" % [best.height, best.canopy_r])
+	if _repro.has("ramp"):
+		_debug_ramp()
 	if _repro.has("stairs") and _frame == 200:
 		_debug_stairs()
 	if _repro.has("plant") and _frame == int(_repro.plant):
@@ -630,7 +641,7 @@ func _sweep_step() -> void:
 			if world.density_at(cam.global_position.lerp(pivot, i / 12.0)) > 0.0:
 				blocked += 1
 		var arm := cam.global_position.distance_to(pivot)
-		_sweep_res.append({"view": v, "worst": worst, "blocked": blocked, "arm": arm, "rock": in_rock, "hidden": not player.visible, "pitch_now": rad_to_deg(cam.pitch + cam._lift), "swing": rad_to_deg(cam._yaw_off)})
+		_sweep_res.append({"view": v, "worst": worst, "blocked": blocked, "arm": arm, "rock": in_rock, "hidden": not player.visible, "pitch_now": rad_to_deg(cam.pitch)})
 
 func _sweep_report() -> void:
 	var inside := 0
@@ -670,8 +681,6 @@ func _sweep_report() -> void:
 				hidden += 1
 			if r.pitch_now > 70.0:
 				topdown += 1
-			if absf(r.swing) > 20.0:
-				swung += 1
 			min_arm = minf(min_arm, r.arm)
 			closest = maxf(closest, r.worst)
 	gen.sample_column(player.global_position.normalized(), _col)
@@ -985,7 +994,7 @@ func _camtest_step() -> void:
 	var back := cam.global_position - player.global_position
 	var jump := cam.global_position.distance_to(_ct_prev) if _ct_prev != Vector3.ZERO else 0.0
 	_ct_prev = cam.global_position
-	var line := "CT f%03d ph%d  cam %.2f m from ball, %+.2f up  jump %.2f  lift %+.2f yaw_off %+.2f goal %s  to-rock %+.0f deg  ball %s" % [_ct_t, _ct_phase, back.length(), back.dot(up), jump, cam._lift, rad_to_deg(cam._yaw_off), ("search" if cam._has_goal else "-"), rad_to_deg(ang), ("visible" if player.visible else "HIDDEN")]
+	var line := "CT f%03d ph%d  cam %.2f m from ball, %+.2f up  jump %.2f  to-rock %+.0f deg  ball %s" % [_ct_t, _ct_phase, back.length(), back.dot(up), jump, rad_to_deg(ang), ("visible" if player.visible else "HIDDEN")]
 	var cres := world.raycast(cam.global_position, -cam.global_transform.basis.z, 60.0)
 	if cres.hit and _ct_t % 20 == 0:
 		print("CT marker (screen centre) lands %.2f m from the ball" % player.global_position.distance_to(cres.point))
@@ -1030,6 +1039,54 @@ func _repro_mouse() -> Vector2:
 	return _vcur
 
 ## Debugging aid (--stairs): a solid step 0.3 m high whose edge runs under the character, so his two boots stand at different heights.
+## Debugging aid (--ramp=DEGREES [--rampw=1] [--slope=STAND,SCRAMBLE]): a big slab rising along the view direction at that angle, the player on it at
+## frame 200; with --rampw=1 W is held from frame 205 (walks up it). Prints SLOPE lines (state every 20 frames) and quits at frame 440.
+var _ramp_n := Vector3.ZERO
+var _ramp_p := Vector3.ZERO
+func _debug_ramp() -> void:
+	if _frame == 200:
+		var up := player.global_position.normalized()
+		var fwd := _flat_dir(cam.view_fwd, up)
+		if _repro.has("rampside"):                          # --rampside=1: it rises to the right of the view (a side view of the pose)
+			fwd = fwd.cross(up).normalized()
+		var right := fwd.cross(up).normalized()
+		var hit := get_world_3d().direct_space_state.intersect_ray(PhysicsRayQueryParameters3D.create(player.global_position, player.global_position - up * 4.0, 1, [player.get_rid()]))
+		if hit.is_empty():
+			print("SLOPE no ground under the player")
+			get_tree().quit()
+			return
+		var th := deg_to_rad(float(_repro.ramp))
+		var n := (up * cos(th) - fwd * sin(th)).normalized()
+		var body := StaticBody3D.new()
+		var cs := CollisionShape3D.new()
+		var bs := BoxShape3D.new()
+		bs.size = Vector3(60.0, 0.5, 60.0)
+		cs.shape = bs
+		body.add_child(cs)
+		var mi := MeshInstance3D.new()
+		var bm := BoxMesh.new()
+		bm.size = bs.size
+		mi.mesh = bm
+		body.add_child(mi)
+		add_child(body)
+		_ramp_p = hit.position + up * 3.0
+		_ramp_n = n
+		body.global_transform = Transform3D(Basis(right, n, right.cross(n)), _ramp_p - n * 0.25)
+		player.global_position = _ramp_p + n * 0.6
+		player.linear_velocity = Vector3.ZERO
+	elif _frame > 200 and _frame % 20 == 0:
+		var up2 := player.global_position.normalized()
+		var uphill := (up2 - _ramp_n * up2.dot(_ramp_n)).normalized()
+		print("SLOPE f=%d along=%.2f speed=%.2f grounded=%s sliding=%s slope=%.1f" % [_frame, (player.global_position - _ramp_p).dot(uphill),
+			player.linear_velocity.length(), player.grounded, player.sliding, player.slope_deg])
+	if _repro.has("rampw") and _frame == 205:
+		var ev := InputEventKey.new()
+		ev.physical_keycode = KEY_W
+		ev.pressed = true
+		Input.parse_input_event(ev)
+	if _frame == 440:
+		get_tree().quit()
+
 func _debug_stairs() -> void:
 	var up := player.global_position.normalized()
 	var fwd := _flat_dir(cam.view_fwd, up)
@@ -1152,5 +1209,15 @@ func _unhandled_input(event: InputEvent) -> void:
 
 ## The mouse turns the camera, at once: what you move is what the view does.
 func _input(event: InputEvent) -> void:
-	if playing and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED and event is InputEventMouseMotion:
-		cam.turn(event.relative)
+	if playing and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED and event is InputEventMouseMotion and not _repro.has("aim"):
+		# the aim roams freely inside the action perimeter; only what would take it past the edge turns the camera
+		var vsize := get_viewport().get_visible_rect().size
+		var centre := vsize * 0.5
+		var np: Vector2 = _vcur + event.relative
+		var off: Vector2 = np - centre
+		var radius := vsize.y * PERIMETER
+		if off.length() > radius:
+			var edge: Vector2 = centre + off.normalized() * radius
+			cam.turn(np - edge)                                # only the outward push
+			np = edge
+		_vcur = np

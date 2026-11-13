@@ -147,6 +147,7 @@ func _show(world: VoxelWorld, t: Dictionary) -> void:
 		col = Color(1.0, 0.25, 0.2)
 	elif t.kind == "rock" or t.kind == "tree":
 		col = Color(1.0, 0.85, 0.3)
+	_mi.visible = true
 	_fill.set_shader_parameter("col", Color(col.r, col.g, col.b, 0.20))
 	_line.set_shader_parameter("col", Color(col.r, col.g, col.b, 0.95))
 	# the patch only changes when the target moves, the ground is edited or the rock is hit
