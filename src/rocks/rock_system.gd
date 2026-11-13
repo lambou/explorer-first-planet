@@ -11,6 +11,7 @@ const MAX_BITES := 48             # bites kept per rock (blows on the same spot 
 const LAST_LEFT := 0.2             # the last blow finds a chunky piece (about a fifth of the rock) to remove, never a tiny stump
 const MIN_LEFT := 0.08            # a rock with less than this left of it is gone (never a tiny stump)
 const TOLERANCE := 0.06           # how much more rock than "blows left" may remain before the bite digs on
+const DIG_ON_MIN_CENTRE := 0.35  # a bite that digs on stops when its centre is this close (x size) to the rock's centre
 const TOL_LOW := 0.03             # ... and how much less may remain (a bite that takes more is cut back)
 
 var gen: PlanetGenerator
@@ -132,7 +133,8 @@ func hit(r: RockInst, rocks: Array, power: float = 1.0, point: Vector3 = Vector3
 			var start: Vector4 = before[idx] if merged else Vector4(full.x, full.y, full.z, 0.0)
 			# coherence: what is left of the rock follows the blows left.
 			var expected := 1.0 - r.wear * (1.0 - LAST_LEFT)         # the blows left decide how much rock is left, but never less than LAST_LEFT before the last blow
-			var left := RockMesher.volume_fraction(r)
+			var samples := RockMesher.solid_samples(r)                   # the unbitten rock's points: built once, the loops below only test bites
+			var left := RockMesher.volume_fraction(r, samples)
 			if left < expected - TOL_LOW:
 				# the bite took too much (the blow landed where it cut deep): take only part of it
 				var lo := 0.0
@@ -140,21 +142,22 @@ func hit(r: RockInst, rocks: Array, power: float = 1.0, point: Vector3 = Vector3
 				for k in 6:
 					var mid := (lo + hi) * 0.5
 					r.bites[idx] = start.lerp(full, mid)
-					if RockMesher.volume_fraction(r) < expected - TOL_LOW:
+					if RockMesher.volume_fraction(r, samples) < expected - TOL_LOW:
 						hi = mid
 					else:
 						lo = mid
 				r.bites[idx] = start.lerp(full, lo)
 			var tries := 0
-			while tries < 25 and RockMesher.volume_fraction(r) > expected + TOLERANCE:
+			while tries < 25 and RockMesher.volume_fraction(r, samples) > expected + TOLERANCE:
 				# it took too little (nothing much to take there, or a crater already through): it digs on
 				var b: Vector4 = r.bites[idx]
 				var c := Vector3(b.x, b.y, b.z)
-				if c.length() > 0.05:
-					c -= c.normalized() * (0.03 * b.w)
+				if c.length() < DIG_ON_MIN_CENTRE * r.size:
+					break                                      # a bite never digs on into the core: the measure counts a hollow as solid, so it would leave a thin shell
+				c -= c.normalized() * (0.03 * b.w)
 				r.bites[idx] = Vector4(c.x, c.y, c.z, minf(maxf(b.w, 0.05) * 1.07, r.size * 2.2))
 				tries += 1
-			done = RockMesher.volume_fraction(r) < MIN_LEFT         # carved right through: nothing left worth keeping
+			done = RockMesher.volume_fraction(r, samples) < MIN_LEFT         # carved right through: nothing left worth keeping
 	if not done:
 		changed[r.id] = _entry(r)
 		return out

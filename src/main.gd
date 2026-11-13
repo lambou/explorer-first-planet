@@ -420,6 +420,8 @@ func _process(delta: float) -> void:
 		while m <= tv[0]:
 			world.carve(base + fwt * m, 2.3)
 			m += 1.6
+	if _repro.has("rockfall") and _frame >= 340:
+		_rockfall_step()
 	if _repro.has("below") and _frame == 325:
 		var upb := player.global_position.normalized()
 		player.global_position -= upb * float(_repro.below)       # into the pit / shaft / tunnel that was dug
@@ -736,6 +738,135 @@ func _seq_step() -> void:
 		_seq_wait = 0
 		if _seq_gone() or _seq_blow > 80:
 			print("SEQ done after %d blows" % _seq_blow)
+			get_tree().quit()
+
+## Debugging aid (--rockfall=prefix [--mode=undercut|chip] [--rocksize=m]): watch a rock fall FRAME BY FRAME. A loose rock near the player is found,
+## the camera is put beside it, then (undercut) the ground under it is dug away, or (chip) the pickaxe strikes its underside until it lets go.
+## Every frame from the first blow/dig until it has rested (and a few more) is saved as "<prefix>_<frame>.png" with a line of numbers
+## (position, speed, spin, contact points). Run with --fixed-fps 60 so one frame is one physics step.
+var _rf_rock: RockInst = null
+var _rf_phase := 0
+var _rf_t := 0
+var _rf_start := Vector3.ZERO
+var _rf_rest := 0
+var _rf_blows := 0
+func _rockfall_step() -> void:
+	aim.reach = 50.0
+	var prefix := String(_repro.rockfall)
+	if _rf_phase == 0:
+		var want := float(_repro.get("rocksize", 1.0))
+		var best: RockInst = null
+		for c: Vector3i in world.chunks:
+			for r: RockInst in (world.chunks[c] as Chunk).rocks:
+				if r.deposit or r.fixed or r.size < want * 0.7 or r.size > want * 1.5 or r.pos.distance_to(player.global_position) > 30.0:
+					continue
+				if best == null or absf(r.size - want) < absf(best.size - want):
+					best = r
+		if best == null:
+			print("RF no loose rock of that size near the player")
+			get_tree().quit()
+			return
+		_rf_rock = best
+		for c2: Vector3i in world.chunks:
+			var ch2: Chunk = world.chunks[c2]
+			for k in ch2.grass_nodes:
+				(ch2.grass_nodes[k] as Node3D).visible = false
+			if ch2.tree_instance != null:
+				ch2.tree_instance.visible = false
+			if ch2.tree_far != null:
+				ch2.tree_far.visible = false
+		far_trees.visible = false
+		hud.visible = false
+		for hv in [player, character, rig]:
+			if hv != null:
+				hv.visible = false                         # nothing between the camera and the rock
+		var upq := best.pos.normalized()
+		var sidev := upq.cross(Vector3.UP).normalized()
+		var dist := best.size * 3.2 + 3.0
+		player.global_position = best.pos + sidev * (dist + 5.0) + upq * 0.6        # parked behind the study camera
+		player.freeze = true
+		var rcam := Camera3D.new()
+		rcam.fov = 50.0
+		add_child(rcam)
+		rcam.global_position = best.pos + sidev * dist + upq * (best.size * 0.9 + 0.6)
+		rcam.look_at(best.pos + upq * (best.size * 0.1), upq)
+		rcam.current = true
+		_rf_start = best.pos
+		print("RF rock size %.2f layers %s fixed %s at %s" % [best.size, best.layers, best.fixed, best.pos])
+		_rf_phase = 1
+		_rf_t = 0
+		return
+	_rf_t += 1
+	var up := _rf_start.normalized()
+	if _rf_phase == 1:
+		if _rf_t == 30:                                       # a second of calm first: the "before" picture
+			get_viewport().get_texture().get_image().save_png("%s_before.png" % prefix)
+		if _rf_t == 40:
+			if String(_repro.get("mode", "undercut")) == "hitonly":
+				pass
+			elif String(_repro.get("mode", "undercut")) == "chip":
+				var side := up.cross(Vector3.UP).normalized() * 2.0
+				for tries in 60:
+					if physics.active() > 0 or not world.chunks.has(VoxelWorld.world_to_chunk(_rf_rock.pos)):
+						break
+					var from := _rf_rock.pos + up * 1.0 + side
+					var aimpt := _rf_rock.pos - up * (_rf_rock.size * 0.6)
+					var res := world.rock_ray(from, aimpt - from, 20.0)
+					if not res.hit:
+						break
+					aim.target = {"kind": "rock", "rock": res.rock, "chunk": res.chunk, "point": res.point, "normal": res.normal, "in_reach": true}
+					print("RF blow: ", _use_tool(false))
+			else:
+				world.carve(_rf_rock.pos - up * (_rf_rock.size * 0.4), _rf_rock.size * 2.0)
+				print("RF dug under the rock")
+			_rf_phase = 2
+			_rf_t = 0
+		return
+	if _rf_phase == 2:
+		var f := _rf_t
+		if String(_repro.get("mode", "undercut")).begins_with("hit"):
+			# the player's way: blow after blow from where the camera is, at the middle of the rock, one blow every 30 frames
+			var gone := _rf_rock == null or not (world.chunks.has(VoxelWorld.world_to_chunk(_rf_rock.pos)) and (world.chunks[VoxelWorld.world_to_chunk(_rf_rock.pos)] as Chunk).rocks.has(_rf_rock))
+			if f % 30 == 1 and _rf_blows < int(_repro.get("blows", 12)) and physics.active() == 0 and not gone:
+				var from := get_viewport().get_camera_3d().global_position
+				var res := world.rock_ray(from, _rf_rock.pos + up * (_rf_rock.size * float(_repro.get("aimh", 0.0))) - from, 60.0)
+				if res.hit:
+					aim.target = {"kind": "rock", "rock": res.rock, "chunk": res.chunk, "point": res.point, "normal": res.normal, "in_reach": true}
+					_rf_blows += 1
+					var out := _use_tool(false)
+					print("RF f%03d BLOW %d: %s  | left %.0f%%  bites %d  size %.2f" % [f, _rf_blows, out, RockMesher.volume_fraction(_rf_rock) * 100.0, _rf_rock.bites.size(), _rf_rock.size])
+				else:
+					print("RF f%03d no rock on the ray" % f)
+			if f % 30 == 20:
+				_rf_rest = 0
+			if (_rf_blows >= int(_repro.get("blows", 12)) or gone) and physics.active() == 0 and f % 30 == 29:
+				print("RF done after %d frames" % f)
+				get_tree().quit()
+		get_viewport().get_texture().get_image().save_png("%s_%03d.png" % [prefix, f])
+		var line := "RF f%03d  falling %d" % [f, physics.active()]
+		for b in physics.debug_bodies():
+			line += "  | h %+.2f  v %.2f  w %.2f  contacts %d  rest %.2f" % [(b.p as Vector3).length() - _rf_start.length(), (b.v as Vector3).length(), (b.w as Vector3).length(), b.n_hit, b.rest]
+		print(line)
+		if physics.active() == 0 and f > 5:
+			_rf_rest += 1
+		if String(_repro.get("mode", "undercut")).begins_with("hit"):
+			return
+		if _rf_rest >= 12 or f >= int(_repro.get("frames", 240)):
+			print("RF done after %d frames" % f)
+			var rr := _rf_rock
+			print("RF rock now: size %.2f  bites %s  left %.0f%%  cut verts %d  fixed %s  normal.up %.2f" % [rr.size, rr.bites, RockMesher.volume_fraction(rr) * 100.0, (rr.cut.verts as PackedVector3Array).size() if not rr.cut.is_empty() else -1, rr.fixed, rr.normal.dot(rr.pos.normalized())])
+			var upc := rr.pos.normalized()
+			player.global_position = rr.pos + upc.cross(Vector3.UP).normalized() * 2.6 + upc * 0.6
+			cam.distance = 2.4
+			var tr := rr.pos - player.global_position
+			tr -= upc * tr.dot(upc)
+			cam.fwd = tr.normalized()
+			_rf_phase = 3
+			_rf_t = 0
+		return
+	if _rf_phase == 3:
+		if _rf_t == 8:
+			get_viewport().get_texture().get_image().save_png("%s_close.png" % prefix)
 			get_tree().quit()
 
 ## Debugging aid (--hit=N): N blows with the tool at the current aim, as if the player held the button.

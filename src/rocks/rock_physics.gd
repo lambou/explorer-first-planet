@@ -13,9 +13,6 @@ const MAX_BODIES := 24
 const REST_SPEED := 0.4
 const REST_TIME := 0.35
 const MAX_AGE := 14.0
-const SUPPORT_FRACTION := 0.28      # share of the underside samples that must touch solid ground
-const EMBED_FRACTION := 0.25        # share of the whole surface that must still touch the floor for a fixed rock to stay
-const MIN_GROUND_UP := 0.62         # the ground under a loose rock may be at most ~52 degrees steep
 
 # ---- tuning of the falling body (change these to change how rocks feel) ----
 const POINTS := 20                  # contact points on the rock's real outline
@@ -27,6 +24,11 @@ const FRICTION_MU := 0.7            # grip on the ground
 const SPIN_DAMP := 3.0              # spin lost per second while touching the ground
 const ROLL_DAMP := 0.8              # speed lost per second while touching the ground
 const AIR_SPIN_DAMP := 0.1
+const SUPPORT_SAMPLES := 96         # outline points sampled by the support test
+const SUPPORT_POINTS := 3           # a rock holds while at least this many of its SUPPORT_SAMPLES outline points touch the ground (3 = it cannot tip)
+const SKIN := 0.06                  # contact distance (density units ~ m) inside which a point already touches
+const SETTLE_SPEED := 1.5           # below this speed (m/s) the extra settling damping applies
+const SETTLE_DAMP := 8.0
 const REST_SPIN := 0.6              # rad/s: slower than this (and slow, and not on a steep slope) counts as resting
 const MIN_REST_UP := 0.6            # ground normal . up needed to come to rest
 
@@ -38,53 +40,25 @@ var _bodies: Array = []
 func active() -> int:
 	return _bodies.size()
 
-## Is the rock held? A FIXED rock is held while it is still really sunk into the floor (solid ground touches enough of its
-## whole surface). A LOOSE rock is held when solid ground touches its underside (7 samples on the lower half) AND that
-## ground is not too steep: on a steep wall it would slide, so it is not held.
+## Is the rock held? It is when at least SUPPORT_POINTS points of its REAL outline (bites included, the pose it lies in) touch the ground:
+## the very test the falling body uses to come to rest, so a rock never falls just because a chip came off its side, and never hangs
+## in the air either. The same rule for every rock type, loose or sunk into the floor.
 func supported(r: RockInst) -> bool:
+	return _touching(r) >= SUPPORT_POINTS
+
+## How many of the rock's outline points touch the ground (within the skin), for the pose it lies in.
+func _touching(r: RockInst) -> int:
 	var f := RockMesher.frame_of(r)
-	var up := r.pos.normalized()
-	var t1 := up.cross(Vector3.UP if absf(up.y) < 0.95 else Vector3.RIGHT).normalized()
-	var t2 := up.cross(t1)
-	var down := -up
-	var dirs: Array[Vector3] = []
-	if r.fixed:
-		# embedded: samples all around (down, up, and rings at -45, 0 and +45 degrees)
-		dirs = [down, up]
-		for el in [-0.8, 0.0, 0.8]:
-			for i in 4:
-				var a := TAU * i / 4.0 + 0.3
-				dirs.append((up * sin(el) + (t1 * cos(a) + t2 * sin(a)) * cos(el)).normalized())
-	else:
-		dirs = [down]
-		for ring in [[0.5, 3], [0.9, 3]]:
-			var tilt: float = ring[0]
-			for i in int(ring[1]):
-				var a := TAU * i / float(ring[1]) + tilt
-				dirs.append((down * cos(tilt) + (t1 * cos(a) + t2 * sin(a)) * sin(tilt)).normalized())
-	var solid := 0
-	var first_contact := Vector3.INF
-	for w in dirs:
-		var wl := Vector3(w.dot(f.x), w.dot(f.y), w.dot(f.z))        # the same direction in the rock's own frame
-		var l := RockMesher.surface_radius(r, f, wl)
-		var p := r.pos + w * l
-		if world.density_at(p) > 0.0:
-			solid += 1
-			if first_contact == Vector3.INF:
-				first_contact = p
-	var frac := float(solid) / dirs.size()
-	if r.fixed:
-		return frac >= EMBED_FRACTION
-	if frac < SUPPORT_FRACTION:
-		return false
-	# the ground under it must be gentle enough to hold a loose rock
-	var e := 0.4
-	var g := Vector3(world.density_at(first_contact + Vector3(e, 0, 0)) - world.density_at(first_contact - Vector3(e, 0, 0)),
-		world.density_at(first_contact + Vector3(0, e, 0)) - world.density_at(first_contact - Vector3(0, e, 0)),
-		world.density_at(first_contact + Vector3(0, 0, e)) - world.density_at(first_contact - Vector3(0, 0, e)))
-	if g.length() < 0.0001:
-		return true
-	return (-g).normalized().dot(up) >= MIN_GROUND_UP
+	var n := 0
+	for i in SUPPORT_SAMPLES:                                  # dense: it runs once per blow, not once per frame (a sparse test misses a rock's real contact patch)
+		var y := 1.0 - 2.0 * (i + 0.5) / SUPPORT_SAMPLES
+		var rr := sqrt(maxf(0.0, 1.0 - y * y))
+		var ph := i * 2.399963229728653
+		var w := Vector3(cos(ph) * rr, y, sin(ph) * rr)
+		var l := RockMesher.surface_radius(r, f, Vector3(w.dot(f.x), w.dot(f.y), w.dot(f.z)))
+		if world.density_at(r.pos + w * l) > -SKIN:
+			n += 1
+	return n
 
 ## The terrain changed around `center` (radius `radius`): loose rocks that lost their support start to fall.
 func after_edit(center: Vector3, radius: float) -> int:
@@ -136,6 +110,14 @@ func start_fall(r: RockInst, ch: Chunk) -> void:
 		mean_r += l / POINTS
 	copy.pos = Vector3.ZERO
 	var baked := RockMesher.bake([copy], world.rocks.catalog, Vector3.ZERO)
+	var exposure := 1.0                                       # lit like the rock in the ground was (else it flashes pale while it falls)
+	var home: Chunk = world.chunks.get(VoxelWorld.world_to_chunk(r.pos))
+	if home != null and not home.dens.is_empty():
+		exposure = ChunkMesher.sky_exposure(home.dens, home.base if not home.base.is_empty() else home.dens, r.pos - home.position + r.normal * (r.size * 0.8 + 0.8), r.normal)
+	var bc: PackedColorArray = baked.colors
+	for ci in bc.size():
+		bc[ci].a = exposure
+	baked.colors = bc
 	var arrays := []
 	arrays.resize(Mesh.ARRAY_MAX)
 	arrays[Mesh.ARRAY_VERTEX] = baked.verts
@@ -153,7 +135,11 @@ func start_fall(r: RockInst, ch: Chunk) -> void:
 	var rho := maxf(mean_r, 0.08)
 	_bodies.append({"rock": r, "node": node, "p": r.pos, "v": Vector3.ZERO, "w": Vector3.ZERO, "rot": Basis.IDENTITY, "rest": 0.0, "age": 0.0,
 		"pts": pts, "inv_i": 1.0 / (0.4 * rho * rho), "e": BOUNCE / (1.0 + r.size),     # a big rock hardly bounces
-		"fx": frame.x, "fy": frame.y, "stuck_t": 0.0, "stuck_p": r.pos, "hit_t": 0.0})
+		"fx": frame.x, "fy": frame.y, "stuck_t": 0.0, "stuck_p": r.pos, "hit_t": 0.0, "n_hit": 0})
+
+## For the frame-by-frame debugging aid (main.gd --rockfall).
+func debug_bodies() -> Array:
+	return _bodies
 
 func stats() -> String:
 	return "Rock physics  %d falling  %.2f ms" % [_bodies.size(), _last_us / 1000.0]
@@ -199,11 +185,12 @@ func _step(b: Dictionary, dt: float) -> bool:
 	for q: Vector3 in b.pts:
 		var off := rot * q
 		var d := world.density_at(p + off)
-		if d > 0.0:
+		if d > -SKIN:                                  # within the skin counts as touching: a resting rock keeps its contact every frame (no hopping)
 			csum += off
 			n_hit += 1
 			deep = maxf(deep, d)
 	var grounded := n_hit > 0
+	b.n_hit = n_hit
 	var n := up
 	if grounded:
 		var rc := csum / n_hit
@@ -214,7 +201,8 @@ func _step(b: Dictionary, dt: float) -> bool:
 			world.density_at(cp + Vector3(0, 0, e)) - world.density_at(cp - Vector3(0, 0, e)))
 		if g.length() > 0.0001:
 			n = (-g).normalized()
-		p += n * minf(deep + 0.01, MAX_PUSH)
+		if deep > 0.0:
+			p += n * minf(deep + 0.01, MAX_PUSH)
 		var vrel := v + w.cross(rc)
 		var vn := vrel.dot(n)
 		var j := 0.0
@@ -238,6 +226,8 @@ func _step(b: Dictionary, dt: float) -> bool:
 			w -= rc.cross(tdir * jt) * inv_i
 		w *= maxf(0.0, 1.0 - SPIN_DAMP * dt)
 		v *= maxf(0.0, 1.0 - ROLL_DAMP * dt)
+		if v.length() < SETTLE_SPEED:                  # a slow rock loses its spin fast: it catches on a face and stops (a real rock is no ball)
+			w *= maxf(0.0, 1.0 - SETTLE_DAMP * dt)
 		if v.length() < REST_SPEED and w.length() < REST_SPIN and n.dot(up) > MIN_REST_UP:
 			b.rest += dt
 		else:

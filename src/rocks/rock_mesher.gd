@@ -66,25 +66,46 @@ static func blob_radius(r: RockInst, f: Dictionary, w: Vector3) -> float:
 	var k := 1.0 if amp <= 0.0 else 1.0 + amp * _lump(u, r.shape)
 	return Vector3(u.x * f.sx, u.y * f.sy, u.z * f.sz).length() * k
 
-## What fraction of the rock is left (1 = whole, 0 = nothing): the volume under the surface over the volume of
-## the unbitten blob, estimated along 40 directions.
-static func volume_fraction(r: RockInst) -> float:
+## What fraction of the rock is left (1 = whole, 0 = nothing): the share of a fixed cloud of points inside the UNBITTEN rock that no bite
+## has taken. It measures the real solid, hollows included (a rock bitten out from inside is NOT mostly there), as the re-meshed shape
+## (RockCut) is the blob minus the bites. `samples` (solid_samples) can be given to skip rebuilding the cloud: hit() asks many times.
+static func volume_fraction(r: RockInst, samples: PackedVector3Array = PackedVector3Array()) -> float:
 	if r.bites.is_empty():
 		return 1.0
+	if samples.is_empty():
+		samples = solid_samples(r)
+	if samples.is_empty():
+		return 1.0
+	var left := 0
+	for p in samples:
+		var taken := false
+		for b: Vector4 in r.bites:
+			if p.distance_squared_to(Vector3(b.x, b.y, b.z)) < b.w * b.w:
+				taken = true
+				break
+		if not taken:
+			left += 1
+	return float(left) / samples.size()
+
+static var _cloud := PackedVector3Array()
+
+## Points (rock frame, metres) spread evenly through the unbitten rock. Fixed cloud, scaled to this rock: the same rock gives the same points.
+static func solid_samples(r: RockInst) -> PackedVector3Array:
+	if _cloud.is_empty():
+		var rng := RandomNumberGenerator.new()
+		rng.seed = 7919
+		while _cloud.size() < 1400:
+			var u := Vector3(rng.randf_range(-1.3, 1.3), rng.randf_range(-1.3, 1.3), rng.randf_range(-1.3, 1.3))
+			if u.length() <= 1.3:
+				_cloud.append(u)
 	var f := frame_of(r)
-	var left := 0.0
-	var whole := 0.0
-	var n := 40
-	for i in n:
-		var y := 1.0 - 2.0 * (i + 0.5) / n
-		var rr := sqrt(maxf(0.0, 1.0 - y * y))
-		var phi := i * 2.399963229728653
-		var w := Vector3(cos(phi) * rr, y, sin(phi) * rr)
-		var l0 := blob_radius(r, f, w)
-		var l := _bitten(r, l0, w)
-		left += l * l * l
-		whole += l0 * l0 * l0
-	return left / maxf(whole, 0.0001)
+	var out := PackedVector3Array()
+	for u in _cloud:
+		var q := Vector3(u.x * f.sx, u.y * f.sy, u.z * f.sz)
+		var l := q.length()
+		if l < 0.0001 or l < blob_radius(r, f, q / l):
+			out.append(q)
+	return out
 
 static func _bitten(r: RockInst, l0: float, w: Vector3) -> float:
 	var l := l0
