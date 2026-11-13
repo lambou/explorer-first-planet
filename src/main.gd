@@ -75,6 +75,9 @@ func _ready() -> void:
 	world = VoxelWorld.new()
 	add_child(world)
 	world.setup(gen)
+	if _repro.has("loadsave"):                           # debugging aid (--loadsave=file): play a COPY of a saved game; the debugging runs never save
+		SaveGame.path = String(_repro.loadsave)
+		SaveGame.pending = SaveGame.read()
 	var saved := SaveGame.pending                       # a saved game (the menu's Continue): its world part goes back before any chunk is built
 	SaveGame.pending = {}
 	if not saved.is_empty():
@@ -420,6 +423,8 @@ func _process(delta: float) -> void:
 		while m <= tv[0]:
 			world.carve(base + fwt * m, 2.3)
 			m += 1.6
+	if _repro.has("camtest") and _frame >= 340:
+		_camtest_step()
 	if _repro.has("rockfall") and _frame >= 340:
 		_rockfall_step()
 	if _repro.has("below") and _frame == 325:
@@ -884,6 +889,85 @@ func _rockfall_step() -> void:
 		if _rf_t == 8:
 			get_viewport().get_texture().get_image().save_png("%s_close.png" % prefix)
 			get_tree().quit()
+
+## Debugging aid (--camtest=prefix --loadsave=file): the player's own situation. In the loaded world, the camera is turned (by the same call the
+## mouse makes) towards the nearest rock, then the rock is struck. Every frame: where the camera is and what its safety logic is doing,
+## and every few frames a picture "<prefix>_<frame>.png". Look for jumps of the camera position and flips of the search goal.
+var _ct_phase := 0
+var _ct_t := 0
+var _ct_rock: RockInst = null
+var _ct_prev := Vector3.ZERO
+var _ct_blows := 0
+var _ct_ok := 0
+func _camtest_step() -> void:
+	var prefix := String(_repro.camtest)
+	if _ct_phase == 0:
+		if _repro.has("at") and _ct_t == 0:                                   # stand where a screenshot was taken (--at=x,y,z)
+			var av := String(_repro.at).split_floats(",")
+			player.global_position = Vector3(av[0], av[1], av[2])
+			player.linear_velocity = Vector3.ZERO
+		_ct_t += 1
+		player.freeze = true
+		if _ct_t < 150 or not world.is_area_ready(player.global_position):
+			return
+		_ct_t = 0
+		var best: RockInst = null
+		for c: Vector3i in world.chunks:
+			for r: RockInst in (world.chunks[c] as Chunk).rocks:
+				if r.deposit or r.size < float(_repro.get("minsize", 0.6)):
+					continue
+				var d := r.pos.distance_to(player.global_position)
+				if d < 14.0 and (best == null or d < best.pos.distance_to(player.global_position)):
+					best = r
+		if best == null:
+			print("CT no rock near the player")
+			get_tree().quit()
+			return
+		_ct_rock = best
+		player.freeze = true
+		cam.pitch = float(_repro.get("campitch", 1.12))
+		cam.distance = 9.0
+		print("CT player %s  rock size %.2f layers %s at %.1f m" % [player.global_position, best.size, best.layers, best.pos.distance_to(player.global_position)])
+		_ct_phase = 1
+		_ct_t = 0
+		return
+	_ct_t += 1
+	player.freeze = true
+	var up := player.global_position.normalized()
+	var to_rock := _ct_rock.pos - player.global_position
+	to_rock -= up * to_rock.dot(up)
+	var ang := cam.view_fwd.signed_angle_to(to_rock.normalized(), up)
+	if _ct_phase == 1:
+		if absf(ang) > 0.03:
+			cam.turn(Vector2(-clampf(ang, -0.08, 0.08) / 0.003, 0.0))         # the same call the mouse makes
+			_ct_ok = 0
+		else:
+			_ct_ok += 1
+			if _ct_ok > 25:
+				_ct_phase = 2
+				_ct_t = 0
+				print("CT camera is on the rock")
+	if _ct_phase == 2 and _ct_t % 40 == 5 and _ct_blows < int(_repro.get("blows", 3)):
+		var res := world.rock_ray(cam.global_position, -cam.global_transform.basis.z, 40.0)
+		var ctr := "the cross (screen centre) is on: " + ("a ROCK" if res.hit else "no rock")
+		if not res.hit:
+			res = world.rock_ray(cam.global_position, (_ct_rock.pos - cam.global_position), 40.0)
+			ctr += "; aiming straight at the rock: " + ("hit" if res.hit else "NOTHING (the ray misses it)")
+		print("CT ", ctr)
+		if res.hit:
+			aim.target = {"kind": "rock", "rock": res.rock, "chunk": res.chunk, "point": res.point, "normal": res.normal, "in_reach": true}
+			_ct_blows += 1
+			print("CT blow %d: %s" % [_ct_blows, _use_tool(false)])
+	var back := cam.global_position - player.global_position
+	var jump := cam.global_position.distance_to(_ct_prev) if _ct_prev != Vector3.ZERO else 0.0
+	_ct_prev = cam.global_position
+	var line := "CT f%03d ph%d  cam %.2f m from ball, %+.2f up  jump %.2f  lift %+.2f yaw_off %+.2f goal %s  to-rock %+.0f deg  ball %s" % [_ct_t, _ct_phase, back.length(), back.dot(up), jump, cam._lift, rad_to_deg(cam._yaw_off), ("search" if cam._has_goal else "-"), rad_to_deg(ang), ("visible" if player.visible else "HIDDEN")]
+	print(line + "   [" + cam.dbg + "]")
+	if _ct_t % 4 == 0:
+		get_viewport().get_texture().get_image().save_png("%s_%d_%03d.png" % [prefix, _ct_phase, _ct_t])
+	if (_ct_phase == 1 and _ct_t > 400) or (_ct_phase == 2 and _ct_t > 40 * int(_repro.get("blows", 3)) + 40):
+		print("CT done")
+		get_tree().quit()
 
 ## Debugging aid (--hit=N): N blows with the tool at the current aim, as if the player held the button.
 func _debug_hit(n: int) -> void:
