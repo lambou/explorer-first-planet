@@ -18,7 +18,8 @@ var physics: RockPhysics
 var tree_fall: TreePhysics
 var far_trees: FarTrees
 var aim: ToolAim
-var _tool_cd := 0.0           # seconds until the tool may strike again while the button is held
+var _tool_cd := 0.0           # short cooldown between strikes (guards rapid re-clicks)
+var _lmb_prev := false        # left button state last frame, for click-edge detection
 var _vcur := Vector2.ZERO      # the tool's cursor (viewport pixels): moves inside the action perimeter, pushes the camera at its edge
 var _pushing := false          # the cursor is against the perimeter and turning the camera
 const PERIMETER := 0.30        # radius of the action perimeter as a fraction of the window height
@@ -221,9 +222,12 @@ func _process(delta: float) -> void:
 	hud.aim_overlay.update_state(vsize * 0.5, vsize.y * PERIMETER, _vcur, cstate, _pushing, Input.mouse_mode == Input.MOUSE_MODE_CAPTURED)
 	_pushing = false
 	_tool_cd -= delta
-	if Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT) and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED and _tool_cd <= 0.0:
+	# one strike per click: holding the button does not repeat
+	var lmb := Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT)
+	if lmb and not _lmb_prev and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED and _tool_cd <= 0.0:
 		_tool_cd = 0.24
 		_use_tool(Input.is_key_pressed(KEY_SHIFT))
+	_lmb_prev = lmb
 	if _repro.has("nofar"):
 		far.visible = false          # debugging aid: which layer draws what
 	if _repro.has("pos"):
