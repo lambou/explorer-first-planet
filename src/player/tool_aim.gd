@@ -106,10 +106,15 @@ func pick(cam: Camera3D, world: VoxelWorld, player_pos: Vector3, mouse: Vector2)
 	_show(world, t)
 	return t
 
+## The tool points at nothing (the mouse is outside the action perimeter).
+func clear() -> void:
+	target = {"kind": "none"}
+	visible = false
+
 func _show(world: VoxelWorld, t: Dictionary) -> void:
 	if t.kind == "none":
 		visible = false
-		return
+		return                                           # (out of reach the patch stays, in red: the tool cannot work there)
 	visible = true
 	global_transform = Transform3D(Basis.IDENTITY, t.point)
 	var col := Color(1.0, 1.0, 1.0)

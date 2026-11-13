@@ -15,7 +15,6 @@ var catalog: TreeCatalog
 var field: TreeField
 var material: ShaderMaterial
 var changed := {}
-var inventory := {}                 # wood name -> units
 
 func setup(p_gen: PlanetGenerator, world_seed: int) -> void:
 	gen = p_gen
@@ -116,17 +115,16 @@ static func _ray_cylinder(o: Vector3, dir: Vector3, a: Vector3, d: Vector3, len:
 # ---------------------------------------------------------------- cutting
 
 ## One blow on a trunk found by ray_trees. `from`: where the player stands (the tree falls away from there).
-## Returns {"event": "hit" | "fell" | "chop" | "gone", "wood": name, "units": int, "dir": fall direction, "colors": chip colours}.
+## Returns {"event": "hit" | "fell" | "chop" | "gone", "wood": name, "type": species key, "units": int, "dir": fall direction, "colors": chip colours}.
 func hit(res: Dictionary, from: Vector3) -> Dictionary:
 	var t: TreeInst = res.tree
 	var ty := catalog.by_id(t.type_id)
-	var out := {"event": "hit", "wood": ty.wood, "units": 0, "dir": Vector3.ZERO, "colors": [ty.bark, Color(0.86, 0.72, 0.5)]}
+	var out := {"event": "hit", "wood": ty.wood, "type": ty.key, "units": 0, "dir": Vector3.ZERO, "colors": [ty.bark, Color(0.86, 0.72, 0.5)]}
 	if t.state == TreeInst.FALLEN:
 		var cut := maxf(0.8, t.length / blows_to_chop(t))
 		var take := minf(cut, t.remaining)
 		t.remaining -= take
 		var units := units_per_log(t, take)
-		_add(ty.wood, units)
 		out.units = units
 		if t.remaining < 0.45:
 			changed[t.id] = true
@@ -160,16 +158,3 @@ func landed(t: TreeInst, axis: Vector3) -> void:
 	t.remaining = t.length
 	t.hits = 0.0
 	changed[t.id] = t.to_state()
-
-func _add(wood: String, units: int) -> void:
-	inventory[wood] = inventory.get(wood, 0) + units
-
-func inventory_text(max_lines: int = 5) -> String:
-	var s := ""
-	var n := 0
-	for k in inventory:
-		if n >= max_lines:
-			break
-		s += "  %s  x%d\n" % [k, inventory[k]]
-		n += 1
-	return s

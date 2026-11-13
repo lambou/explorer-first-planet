@@ -1,7 +1,8 @@
 class_name RockSystem
 extends RefCounted
 ## Owner of everything about rocks (like WaterSystem for water): the catalog of rock types of this world, the
-## geology, the placement and baking per chunk, what has been broken or chipped, and what has been harvested.
+## geology, the placement and baking per chunk, and what has been broken or chipped. What a blow yields is reported to the caller
+## (see Harvester); nothing is kept here.
 ## The rest of the game talks to rocks only through this class and the per-chunk data it hands out.
 ## See docs/ROCKS_PLAN.md for the rules (cheap by design: one baked mesh per chunk, built on the worker thread).
 
@@ -18,7 +19,6 @@ var field: RockField
 var deposits: RockDeposits
 ## The only things stored about rocks: id -> true (broken) or {"layers", "size", "hits"} (chipped: its shell is gone).
 var changed := {}
-var inventory := {}               # rock type key -> units harvested
 var moved_index := {}             # chunk coord -> ids of rocks that were displaced and now lie there (their state is in `changed`)
 
 func setup(p_gen: PlanetGenerator, world_seed: int) -> void:
@@ -159,7 +159,6 @@ func hit(r: RockInst, rocks: Array, power: float = 1.0, point: Vector3 = Vector3
 		changed[r.id] = _entry(r)
 		return out
 	var units := layer_units(r)
-	_add_inventory(t.key, units)
 	out.units = units
 	if r.layers.size() > 1:
 		# the shell comes off: what is left is the core, a smaller rock
@@ -208,22 +207,6 @@ func _add_bite(r: RockInst, point: Vector3) -> int:
 		r.bites.remove_at(0)
 	r.bites.append(Vector4(c.x, c.y, c.z, rho))
 	return r.bites.size() - 1
-
-func _add_inventory(key: String, units: int) -> void:
-	inventory[key] = inventory.get(key, 0) + units
-
-## A line per harvested type for the panel, most valuable first.
-func inventory_text(max_lines: int = 6) -> String:
-	var rows: Array = []
-	for k in inventory:
-		rows.append([catalog.get_type(k).value, catalog.get_type(k).name, inventory[k]])
-	rows.sort_custom(func(a: Array, b: Array) -> bool: return a[0] > b[0])
-	var s := ""
-	for i in mini(rows.size(), max_lines):
-		s += "  %s  x%d\n" % [rows[i][1], rows[i][2]]
-	if rows.size() > max_lines:
-		s += "  ... +%d more\n" % (rows.size() - max_lines)
-	return s
 
 # ---------------------------------------------------------------- picking
 

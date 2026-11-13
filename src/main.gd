@@ -18,11 +18,22 @@ var physics: RockPhysics
 var tree_fall: TreePhysics
 var far_trees: FarTrees
 var aim: ToolAim
+var kit: PlayerKit            # what the explorer carries and owns (data); the Hud shows it
+var tool_user: ToolUser       # what a tool does to the world
+var autosave: Autosave           # saves everything done in the world, by itself
+var _snapshot := WorldSnapshot.new()
+var _playtime := 0.0          # seconds played (saved)
+var tree_fade := TreeFade.new()  # which trees block the view and fade (the shader does the fading)
+var torches: PlacedTorches    # the torches planted in the world
+var _aiming := false          # the mouse is held by the game (playing, window active, no menu): the crosshair is live
+var character: PlayerCharacter  # the explorer's looks (the ball is only his physics)
+var rig: ToolRig              # the tool in the ball's hand, animated; says when the blow lands
 var _tool_cd := 0.0           # short cooldown between strikes (guards rapid re-clicks)
 var _lmb_prev := false        # left button state last frame, for click-edge detection
-var _vcur := Vector2.ZERO      # the tool's cursor (viewport pixels): moves inside the action perimeter, pushes the camera at its edge
-var _pushing := false          # the cursor is against the perimeter and turning the camera
-const PERIMETER := 0.30        # radius of the action perimeter as a fraction of the window height
+var _vcur := Vector2.ZERO      # where the tool aims on screen: the crosshair, the middle of the window (--aim= moves it for tests)
+var playing := true                # false while Boot shows the loading screen: the world builds, nothing answers the player yet
+var _has_focus := true             # the window is the active one (from the focus events)
+var _mouse_freed := false          # Esc: the mouse is given back until the next click
 var sun: DirectionalLight3D
 var sun_disc: MeshInstance3D
 var env: Environment
@@ -40,7 +51,17 @@ var _frame := 0
 var _sweep: Array = []          # camera sweep (--sweep): the views to try
 var _sweep_res: Array = []
 
+const BOOT_SCENE := "res://src/boot/boot.tscn"
+
 func _ready() -> void:
+	# Run on its own (F6 on this scene, no debugging options) the game would skip the menu: go through it, like the project does.
+	if get_parent() == get_tree().root and OS.get_cmdline_user_args().is_empty():
+		set_process(false)
+		set_process_input(false)
+		set_process_unhandled_input(false)
+		set_physics_process(false)
+		get_tree().change_scene_to_file.call_deferred(BOOT_SCENE)
+		return
 	for a in OS.get_cmdline_user_args():
 		if a.begins_with("--seed="):
 			WorldConfig.world_seed = WorldConfig.parse_seed(a.substr(7))   # a number or any text
@@ -54,6 +75,10 @@ func _ready() -> void:
 	world = VoxelWorld.new()
 	add_child(world)
 	world.setup(gen)
+	var saved := SaveGame.pending                       # a saved game (the menu's Continue): its world part goes back before any chunk is built
+	SaveGame.pending = {}
+	if not saved.is_empty():
+		WorldSnapshot.restore_world(saved, world)
 	debris = RockDebris.new()
 	debris.world = world
 	add_child(debris)
@@ -99,22 +124,82 @@ func _ready() -> void:
 	player.cam = cam
 	player.world = world
 
+	kit = PlayerKit.new()
+	kit.harvester.bind_world(gen, world.rocks, world.trees)
+	tool_user = ToolUser.new()
+	tool_user.world = world
+	tool_user.gen = gen
+	tool_user.debris = debris
+	tool_user.tree_fall = tree_fall
+	tool_user.kit = kit
+	torches = PlacedTorches.new()
+	torches.world = world
+	add_child(torches)
+	torches.dropped.connect(func(id: String, left: float) -> void:
+		kit.belt.add(id, 1, left)
+		hud.say("A torch fell: its ground was dug away"))
+	torches.burnt_out.connect(func() -> void: hud.say("A torch burnt out", UiTheme.WARN))
+	tool_user.torches = torches
+
 	hud = Hud.new()
 	add_child(hud)
+	hud.bind(kit)
 	hud.radar.setup(gen)
-	# the mouse aims the tool inside the action perimeter; pushing past its edge turns the camera (see _unhandled_input)
-	# capture the mouse only while the window really has focus (started from the editor it may be in the background):
-	# otherwise it stays free until the player clicks in the game
-	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED if (DisplayServer.window_is_focused() or _repro.has("pos")) else Input.MOUSE_MODE_VISIBLE
+	# the mouse turns the camera, instantly (see _input); the crosshair in the middle of the screen is where the tool aims
+	# the mouse is held in the window only while the game is being played AND the window is the active one (see _process)
+	_has_focus = DisplayServer.window_is_focused()
+	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+	hud.visible = playing
+	hud.enabled = playing
 	_vcur = get_viewport().get_visible_rect().size * 0.5
 	aim = ToolAim.new()
 	add_child(aim)
+	rig = ToolRig.new()
+	rig.setup(player, cam, kit)
+	add_child(rig)
+	rig.struck.connect(_on_tool_struck)
+	character = PlayerCharacter.new()
+	add_child(character)
+	character.setup(player, rig)
+	rig.character = character
+	autosave = Autosave.new()
+	autosave.capture = _capture_save
+	add_child(autosave)
+	if not saved.is_empty():
+		var clock := WorldSnapshot.restore_player(saved, player, kit, torches)
+		sun_angle = clock.sun_angle
+		season = clock.season
+		_playtime = clock.playtime
+	# everything done in the world is saved shortly after (and every 30 s, and at close)
+	world.terrain_edited.connect(func(_c: Vector3, _r: float) -> void: autosave.request())
+	kit.inventory.changed.connect(autosave.request)
+	kit.belt.changed.connect(autosave.request)
+	tree_fall.landed.connect(func(_t: TreeInst, _p: Vector3, _c: Array) -> void: autosave.request())
+	autosave.enabled = playing and (_repro.is_empty() or _repro.has("save"))       # the debugging runs never save (unless --save=1)
 	_apply_repro()
 
 ## Launch options that load the exact view from a captured HUD panel (the panel prints the same numbers):
 ##   --pos=X,Y,Z  --heading=DEG  --pitch=DEG  --dist=M  --sun=DEG  --shot=path.png  (shot: save the frame and quit)
+## Survival aids: --give=clay:6,rock:granite:3  (items into the pack)  --tool=ID  --menu=1  (inventory screen open)
+##   --roll=SPEED (the player is pushed sideways at that m/s)  --jump=FRAME  --turnaround=1 (the character faces the camera)
+##   --behindtree=1 (the player is moved 5 m behind the nearest tree, as seen from the camera: it blocks the view)
+##   --stairs=1 (a 0.3 m step under the character, to see the boots take different heights)
+##   --use=FRAME  (one use of the tool in hand at that frame, at the cursor / --aim)  --addtool=torch  --plant=FRAME  --pickup=FRAME
 ## The player stays frozen at the position so the view does not drift.
 func _apply_repro() -> void:
+	if _repro.has("give"):
+		for part: String in String(_repro.give).split(","):
+			var f := part.split(":")
+			var id := f[0] if f.size() < 3 else f[0] + ":" + f[1]
+			if id.begins_with("rock:"):
+				kit.harvester.rock_item(id.get_slice(":", 1))
+			kit.inventory.add(id, int(f[f.size() - 1]))
+	if _repro.has("addtool"):
+		kit.belt.add(String(_repro.addtool))
+	if _repro.has("tool"):
+		kit.belt.select_id(String(_repro.tool))
+	if _repro.has("menu"):
+		hud.set_menu_open(true)
 	if _repro.has("pos"):
 		var v := String(_repro.pos).split_floats(",")
 		if v.size() == 3:
@@ -191,15 +276,44 @@ func _sun_dir() -> Vector3:
 	var decl := deg_to_rad(AXIAL_TILT) * sin(season)
 	return Vector3(cos(decl) * cos(sun_angle), sin(decl), cos(decl) * sin(sun_angle)).normalized()
 
-## Leaving the window (alt-tab, another window in front) frees the mouse; a click in the game takes it back.
+## The mouse is held only while the game is played with its window active (see _process); the moment the window loses focus it is let go.
 func _notification(what: int) -> void:
-	if (what == NOTIFICATION_APPLICATION_FOCUS_OUT or what == NOTIFICATION_WM_WINDOW_FOCUS_OUT) and not _repro.has("pos"):
+	if what == NOTIFICATION_APPLICATION_FOCUS_IN or what == NOTIFICATION_WM_WINDOW_FOCUS_IN:
+		_has_focus = true
+	elif what == NOTIFICATION_APPLICATION_FOCUS_OUT or what == NOTIFICATION_WM_WINDOW_FOCUS_OUT:
+		_has_focus = false
 		Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+		if autosave != null:
+			autosave.request()
+	elif what == NOTIFICATION_WM_CLOSE_REQUEST and autosave != null:
+		autosave.save_now()                              # closing the game: the save is written at once
+
+## The loading screen asks: how much of the starting ground is built (0..1), and may the game start.
+func loading_progress() -> float:
+	return world.area_progress(player.global_position) if world != null and player != null else 0.0
+
+func is_ready_to_play() -> bool:
+	return world != null and player != null and not player.freeze and world.is_area_ready(player.global_position)
+
+## The loading screen is gone: the game answers the player now.
+func begin_play() -> void:
+	playing = true
+	hud.visible = true
+	hud.enabled = true
+	_mouse_freed = false
+	autosave.enabled = _repro.is_empty() or _repro.has("save")
 
 func _process(delta: float) -> void:
-	# safety net: never keep the mouse captured while the window is not the active one
-	if Input.mouse_mode == Input.MOUSE_MODE_CAPTURED and not _repro.has("pos") and not DisplayServer.window_is_focused():
-		Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+	if playing:
+		_playtime += delta
+	# the mouse: held (captured) while the game is played with its window active, no menu open and Esc not pressed; otherwise it is an ordinary
+	# cursor. Decided afresh every frame from the window's focus, so it can never stay held in a window that is in the background.
+	var tests := not _repro.is_empty()                 # the debugging runs never take the mouse
+	var focused := _has_focus and DisplayServer.window_is_focused()
+	var held := playing and focused and not hud.menu_open() and not _mouse_freed and not tests
+	var wanted := Input.MOUSE_MODE_CAPTURED if held else Input.MOUSE_MODE_VISIBLE
+	if Input.mouse_mode != wanted:
+		Input.mouse_mode = wanted
 	world.update_center(player.global_position)
 	far.update_center(player.global_position)
 	world.set_view(cam.global_position, -cam.global_transform.basis.z)
@@ -212,22 +326,65 @@ func _process(delta: float) -> void:
 	else:
 		far.set_sky_cut(Vector3.ZERO, Vector3.ZERO, 0.0)
 	_frame += 1
-	if _repro.has("aim"):
-		_vcur = _repro_mouse()
-	aim.pick(cam, world, player.global_position, _vcur)
 	var vsize := get_viewport().get_visible_rect().size
+	_vcur = _repro_mouse() if _repro.has("aim") else vsize * 0.5
+	var aiming := _repro.has("aim") or held
+	_aiming = aiming
+	# the character faces where the camera faces, and his head follows how far the camera looks up or down
+	character.aim_dir = cam.view_fwd
+	var cup := player.global_position.normalized()
+	character.look_pitch = asin(clampf((-cam.global_transform.basis.z).dot(cup), -1.0, 1.0))
+	if aiming:
+		aim.pick(cam, world, player.global_position, _vcur)
+	else:
+		aim.clear()
 	var cstate := 0
 	if aim.target.kind != "none":
 		cstate = 2 if not aim.target.in_reach else (3 if aim.target.kind == "rock" else 1)
-	hud.aim_overlay.update_state(vsize * 0.5, vsize.y * PERIMETER, _vcur, cstate, _pushing, Input.mouse_mode == Input.MOUSE_MODE_CAPTURED)
-	_pushing = false
+	hud.aim_overlay.update_state(_vcur, cstate, aiming)
 	_tool_cd -= delta
-	# one strike per click: holding the button does not repeat
+	kit.update(delta)
+	# one use per click: holding the button does not repeat. The tool swings first; the world changes when it lands (_on_tool_struck)
 	var lmb := Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT)
-	if lmb and not _lmb_prev and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED and _tool_cd <= 0.0:
-		_tool_cd = 0.24
-		_use_tool(Input.is_key_pressed(KEY_SHIFT))
+	if lmb and not _lmb_prev and aiming and _tool_cd <= 0.0 and not rig.busy:
+		if Input.is_key_pressed(KEY_SHIFT) and kit.belt.current_id() == "pickaxe":
+			_use_tool(true)                          # Shift + click: place stone where the pickaxe points (an old debug aid)
+		else:
+			_begin_tool_use()
 	_lmb_prev = lmb
+	if _repro.has("use") and _frame == int(_repro.use):
+		_begin_tool_use()
+	if _repro.has("roll"):
+		var upr := player.global_position.normalized()
+		var rr := cam.view_fwd.cross(upr).normalized()
+		if _repro.has("toward"):
+			rr = -cam.view_fwd                       # --toward=1: towards the camera, face first
+		var vr := player.linear_velocity
+		player.linear_velocity = rr * float(_repro.roll) + upr * vr.dot(upr)
+	if _repro.has("jump") and _frame == int(_repro.jump):
+		player.apply_central_impulse(player.global_position.normalized() * BallPlayer.JUMP_IMPULSE)
+	if _repro.has("turnaround") and _frame < 340:
+		character.facing = -cam.view_fwd
+	if _repro.has("behindtree") and _frame == 200:
+		var best: TreeInst = null
+		for c3: Vector3i in world.chunks:
+			for tt: TreeInst in (world.chunks[c3] as Chunk).trees:
+				if tt.state == TreeInst.STANDING and tt.height > 8.0 and tt.pos.distance_to(player.global_position) < 40.0:
+					if best == null or tt.pos.distance_to(player.global_position) < best.pos.distance_to(player.global_position):
+						best = tt
+		if best != null:
+			var upt := best.pos.normalized()
+			var ft := (cam.view_fwd - upt * cam.view_fwd.dot(upt)).normalized()
+			player.global_position = best.pos + ft * 5.0 + upt * 1.0
+			player.linear_velocity = Vector3.ZERO
+			cam.distance = 9.0
+			print("BEHINDTREE tree %.1f m high, crown radius %.1f" % [best.height, best.canopy_r])
+	if _repro.has("stairs") and _frame == 200:
+		_debug_stairs()
+	if _repro.has("plant") and _frame == int(_repro.plant):
+		_place_torch()
+	if _repro.has("pickup") and _frame == int(_repro.pickup):
+		_pickup_torch()
 	if _repro.has("nofar"):
 		far.visible = false          # debugging aid: which layer draws what
 	if _repro.has("pos"):
@@ -346,7 +503,8 @@ func _process(delta: float) -> void:
 	if not UnderwaterEffect.apply(env, sun, cam_sub, day):
 		UnderwaterEffect.reset(sun, env)
 	# trees between the camera and the player fade out (dithered), and so does a crown the camera is inside
-	RenderingServer.global_shader_parameter_set("tree_cam", Vector4(cam.global_position.x, cam.global_position.y, cam.global_position.z, 2.4))
+	RenderingServer.global_shader_parameter_set("tree_cam", Vector4(cam.global_position.x, cam.global_position.y, cam.global_position.z, 0.0))
+	tree_fade.update(world.chunks, cam.global_position, player.global_position + player.global_position.normalized() * 0.5, delta)     # whole trees in the line of sight fade
 	RenderingServer.global_shader_parameter_set("tree_target", Vector4(player.global_position.x, player.global_position.y, player.global_position.z, 0.0))
 	world.grass.set_light(sd, sun.light_color, sun.light_energy, env.ambient_light_energy)    # the grass is lit by hand with what the sun and the water just ended up with
 
@@ -384,8 +542,7 @@ func _update_hud(day: float) -> void:
 		+ "%s\n" % far.stats().replace("  building", " | build")
 		+ "%s   FPS %d\n\n" % ["FLY" if player.fly else "ROLL", Engine.get_frames_per_second()]
 		+ aim.describe(world)
-		+ _harvest_text()
-		+ "[WASD] move\n[Space] jump / swim up\n[Ctrl] dive\n[F] fly\n[R] respawn\n[C] cave spawn (Shift: sinkhole)\n[LMB] break / dig (hold)\n[RMB] place stone\n[mouse past the circle] turn camera\n"
+		+ "[WASD] move (relative to the camera)\n[Space] jump / swim up\n[Ctrl] dive\n[F] fly\n[R] respawn\n[C] cave spawn (Shift: sinkhole)\n[mouse] look around (the cross in the middle is the tool aim)\n[LMB] use the tool   [Esc] free the mouse\n[Q] next tool   [1-9] bar slot   [Tab / I] inventory\n[T] plant a torch   [E] pick it up\n[Shift+LMB] place stone (pickaxe)\n"
 		+ "[wheel / +/-] radar zoom\n[Ctrl+wheel] camera\n[Esc] free mouse")
 
 ## The nearest cave of either kind: a closed room (dark, fine) or a sinkhole floor open to the sky (daylight).
@@ -593,40 +750,96 @@ func _repro_mouse() -> Vector2:
 			return Vector2(a[0], a[1])
 	return _vcur
 
-## One use of the tool at what the mouse points at: a rock is bitten into (loses its shell, then breaks);
-## otherwise the ground is dug. `place`: put stone there instead. Returns a short description.
-func _use_tool(place: bool) -> String:
-	var t: Dictionary = aim.target
-	if t.kind == "none" or not t.in_reach:
-		return "out of reach" if t.kind != "none" else "nothing"
-	if place:
-		world.fill(t.point + t.normal * 1.2, 1.8, BlockTypes.STONE)
-		return "placed"
-	if t.kind == "tree":
-		var tres := world.hit_tree(t, player.global_position)
-		var tn: int = {"hit": 3, "fell": 6, "chop": 8, "gone": 10}[tres.event]
-		debris.burst(t.point, t.normal, tres.colors, tn, 0.09 + 0.05 * t.tree.trunk_r)
-		if tres.event == "fell":
-			tree_fall.start_fall(t.tree, t.chunk, tres.dir)
-		return "%s %s (%d units)" % [tres.event, tres.wood, tres.units]
-	if t.kind == "rock":
-		var res := world.hit_rock(t)
-		var n: int = {"hit": 2, "shed": 7, "broken": 11}[res.event]
-		n = int(n * (1.0 + t.rock.size))              # a big rock throws more pieces
-		debris.burst(t.point, t.normal, res.colors, n, 0.10 + 0.07 * t.rock.size)
-		return "%s %s (%d units)" % [res.event, res.type, res.units]
-	world.carve(t.point, 2.4)
-	_ground_debris(t.point)
-	return "dug"
+## Debugging aid (--stairs): a solid step 0.3 m high whose edge runs under the character, so his two boots stand at different heights.
+func _debug_stairs() -> void:
+	var up := player.global_position.normalized()
+	var fwd := _flat_dir(cam.view_fwd, up)
+	var right := fwd.cross(up).normalized()
+	var space := get_world_3d().direct_space_state
+	var hit := space.intersect_ray(PhysicsRayQueryParameters3D.create(player.global_position, player.global_position - up * 4.0, 1, [player.get_rid()]))
+	if hit.is_empty():
+		print("STAIRS no ground under the player")
+		return
+	for c2: Vector3i in world.chunks:                                      # a clear view of the boots: no grass in the way
+		for k in (world.chunks[c2] as Chunk).grass_nodes:
+			((world.chunks[c2] as Chunk).grass_nodes[k] as Node3D).visible = false
+	var step := StaticBody3D.new()
+	var cs := CollisionShape3D.new()
+	var bs := BoxShape3D.new()
+	bs.size = Vector3(3.0, 0.3, 4.0)
+	cs.shape = bs
+	step.add_child(cs)
+	var mi := MeshInstance3D.new()
+	var bm := BoxMesh.new()
+	bm.size = bs.size
+	mi.mesh = bm
+	step.add_child(mi)
+	add_child(step)
+	step.global_transform = Transform3D(Basis(right, up, -fwd), hit.position + right * 1.5 + up * 0.15)
+	player.global_position = hit.position + up * 0.8 + right * 0.08           # on the step, its edge just under the ball: one boot over the step, the other over the drop
 
-## Pieces of ground flying off where the terrain is dug (they vanish; the dug hole is the real change).
-func _ground_debris(p: Vector3) -> void:
-	var d := p.normalized()
-	var col := Column.new()
-	gen.sample_column(d, col)
-	var alt := p.length() - R
-	var ground_col: Color = gen.surface.color_for(col) if alt > col.height - 3.0 else BlockTypes.COLORS[BlockTypes.STONE]
-	debris.burst(p, d, [ground_col, ground_col.darkened(0.2), BlockTypes.COLORS[BlockTypes.STONE]], 6, 0.16)
+static func _flat_dir(v: Vector3, up: Vector3) -> Vector3:
+	return (v - up * v.dot(up)).normalized()
+
+## The mouse button went down: swing the tool in hand at what it points at, if it can do anything there.
+func _begin_tool_use() -> void:
+	var tool := kit.belt.current()
+	if tool == null:
+		return
+	var t: Dictionary = aim.target
+	var can := tool_user.check(tool, t)
+	if not can.ok:
+		hud.say(can.msg, UiTheme.WARN)
+		return
+	if tool.action == ToolDef.LIGHT:
+		_place_torch()                                   # a torch is planted, not swung
+		return
+	var snap := t.duplicate()
+	if tool.action == ToolDef.SCOOP:
+		snap["lift"] = clampf(world.submersion(t.point), 0.0, 4.0)       # the bucket dips under the surface, not down to the sea bed
+	_tool_cd = rig.use_time()
+	rig.begin_use(snap)
+
+## [T]: plant a torch from the belt where the mouse points, whatever tool is in hand.
+func _place_torch() -> void:
+	var torch_id := kit.belt.torch_to_plant()
+	if torch_id == "":
+		hud.say("No torch to plant: craft one first", UiTheme.WARN)
+		return
+	var can := tool_user.check(ToolCatalog.get_def(torch_id), aim.target)
+	if not can.ok:
+		hud.say(can.msg if can.msg != "" else "Point at a surface within reach", UiTheme.WARN)
+		return
+	tool_user.plant_torch(aim.target)
+	autosave.request()
+
+## [E]: pick up the planted torch the mouse points at.
+func _pickup_torch() -> void:
+	if not _aiming:
+		return
+	var got := torches.pick_up(cam.project_ray_origin(_vcur), cam.project_ray_normal(_vcur), player.global_position, aim.reach)
+	if not got.is_empty():
+		kit.belt.add(got.id, 1, got.fuel)                  # it keeps the fuel it has left
+		autosave.request()
+		hud.say("Picked up a %s (%s left)" % [ToolCatalog.get_def(got.id).name.to_lower(), _clock(got.fuel)], UiTheme.GOOD)
+	else:
+		hud.say("No torch there", UiTheme.WARN)
+
+static func _clock(seconds: float) -> String:
+	return "%d:%02d" % [int(seconds) / 60, int(seconds) % 60]
+
+## The tool landed: now the world changes and the harvest is taken.
+func _on_tool_struck(target: Dictionary) -> void:
+	tool_user.use(kit.belt.current_id(), target, player.global_position, false)
+	autosave.request()                                  # a rock chipped, a tree cut ...
+
+## The game as data, for the save.
+func _capture_save() -> Dictionary:
+	return _snapshot.capture(world, player, kit, torches, {"sun_angle": sun_angle, "season": season, "playtime": _playtime})
+
+## Debugging aids (--hit, --seq) strike at once, with the pickaxe, without the swing.
+func _use_tool(place: bool) -> String:
+	return tool_user.use("pickaxe", aim.target, player.global_position, place)
 
 ## [C]: move to the floor of the nearest cave (open or closed; this becomes the respawn point too).
 ## Shift+C: the nearest sinkhole floor (a shaft open to the sky).
@@ -640,40 +853,25 @@ func _spawn_in_cave() -> void:
 	player.respawn()
 	_hole = 0.0
 
-func _harvest_text() -> String:
-	if world.rocks.inventory.is_empty() and world.trees.inventory.is_empty():
-		return ""
-	return "Harvest\n" + world.rocks.inventory_text() + world.trees.inventory_text() + "\n"
-
 ## A felled tree hit the ground: its crown bursts into leaves.
 func _on_tree_landed(_tree: TreeInst, point: Vector3, colors: Array) -> void:
 	debris.burst(point, point.normalized(), colors, 28, 0.2)
 
 func _unhandled_input(event: InputEvent) -> void:
+	if not playing:
+		return
 	if event is InputEventKey and event.pressed and not event.echo:
 		match event.physical_keycode:
 			KEY_F: player.toggle_fly()
 			KEY_R: player.respawn()
 			KEY_C: _spawn_in_cave()
-			KEY_ESCAPE:
-				Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
-	elif event is InputEventMouseMotion and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED and not _repro.has("aim"):
-		# the cursor roams inside the action perimeter; what would take it beyond the edge turns the camera
-		var vsize := get_viewport().get_visible_rect().size
-		var centre := vsize * 0.5
-		var radius := vsize.y * PERIMETER
-		var np: Vector2 = _vcur + event.relative
-		var off: Vector2 = np - centre
-		if off.length() > radius:
-			var edge: Vector2 = centre + off.normalized() * radius
-			cam.turn(np - edge)                  # only the outward push
-			np = edge
-			_pushing = true
-		_vcur = np
-	elif event is InputEventMouseButton and event.pressed:
-		if Input.mouse_mode == Input.MOUSE_MODE_VISIBLE:
-			Input.mouse_mode = Input.MOUSE_MODE_CAPTURED           # back into the game (this click does nothing else)
-			return
-		if event.button_index == MOUSE_BUTTON_RIGHT:
-			aim.pick(cam, world, player.global_position, _vcur)
-			_use_tool(true)                                          # place stone where the tool points
+			KEY_T: _place_torch()
+			KEY_E: _pickup_torch()
+			KEY_ESCAPE: _mouse_freed = true                          # give the mouse back (click in the window to take it again)
+	elif event is InputEventMouseButton and event.pressed and _mouse_freed and not hud.menu_open():
+		_mouse_freed = false                                       # this click only takes the mouse back: no swing
+
+## The mouse turns the camera, at once: what you move is what the view does.
+func _input(event: InputEvent) -> void:
+	if playing and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED and event is InputEventMouseMotion:
+		cam.turn(event.relative)

@@ -4,7 +4,7 @@ config_version=5
 [application]
 
 config/name="Explorer Universe"
-run/main_scene="res://src/main.tscn"
+run/main_scene="res://src/boot/boot.tscn"
 config/features=PackedStringArray("4.7", "GL Compatibility")
 
 [display]

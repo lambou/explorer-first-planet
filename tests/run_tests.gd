@@ -299,6 +299,8 @@ func _init() -> void:
 	_ball_ground_tests()
 	_grass_tests()
 	_tree_tests()
+	_survival_tests()
+	_save_tests()
 
 	print("failures: ", failures)
 	quit(failures)
@@ -1223,24 +1225,27 @@ func _ball_ground_tests() -> void:
 	var col := Column.new()
 	g.sample_height(up, col)
 	var surf := up * (5120.0 + col.height)
-	b.position = surf + up * 0.1                 # the ball's lowest 0.4 m are in the ground
+	var zdir := up.cross(Vector3.RIGHT).normalized()
+	b.basis = Basis(up.cross(zdir), up, zdir)    # standing upright on the planet (the body does this itself every physics step)
+	b.position = surf + up * 0.1                 # the capsule's lowest 0.4 m are in the ground
 	var inside0 := w.density_at(b.position - up * 0.5)
 	for i in 12:
 		b._keep_out_of_ground()
 	var worst := -9.0
-	for dir in BallPlayer.SURFACE_PROBES:
-		worst = maxf(worst, w.density_at(b.position + dir * BallPlayer.RADIUS))
-	print("  ball sunk 0.25 m: its lowest point was %.2f inside, after the guard the worst surface point is %.2f" % [inside0, worst])
-	check(worst <= BallPlayer.TOLERANCE + 0.05, "a ball that is partly in the ground is pushed out of it")
+	for cy in [BallPlayer.CAPSULE_CENTRE - BallPlayer.CAPSULE_HEIGHT * 0.5 + BallPlayer.CAPSULE_RADIUS, BallPlayer.CAPSULE_CENTRE + BallPlayer.CAPSULE_HEIGHT * 0.5 - BallPlayer.CAPSULE_RADIUS]:
+		for dir in BallPlayer.SURFACE_PROBES:
+			worst = maxf(worst, w.density_at(b.position + up * cy + dir * BallPlayer.CAPSULE_RADIUS))
+	print("  capsule sunk 0.4 m: its lowest point was %.2f inside, after the guard the worst surface point is %.2f" % [inside0, worst])
+	check(worst <= BallPlayer.TOLERANCE + 0.05, "a body that is partly in the ground is pushed out of it")
 	check(b.position.distance_to(surf) < 1.0, "it is lifted a little, not thrown away")
 	var air := surf + up * 3.0
 	b.position = air
 	b._keep_out_of_ground()
-	check(b.position.distance_to(air) < 0.0001, "a ball in the air is not touched")
+	check(b.position.distance_to(air) < 0.0001, "a body in the air is not touched")
 	var deep := surf - up * 6.0
 	b.position = deep
 	b._keep_out_of_ground()
-	check(b.position.distance_to(deep) < 0.0001, "a buried ball is not moved (no rescue)")
+	check(b.position.distance_to(deep) < 0.0001, "a buried body is not moved (no rescue)")
 	b.free()
 	w.free()
 
@@ -1517,16 +1522,18 @@ func _tree_tests() -> void:
 	check(tr0.state == TreeInst.FALLEN and tr0.remaining > 5.0, "a felled tree lies as a trunk")
 	var chops := 0
 	var last := ""
-	var wood0: int = ts.inventory.get(ts.wood_name(tr0), 0)
+	var wood0 := 0
+	var wood := 0                                       # what the blows report (the player's inventory lives elsewhere, see Harvester)
 	while chops < 80:
 		var r2 := ts.hit({"tree": tr0, "chunk": ch, "point": tr0.pos + tr0.axis * 1.0 + tr0.up}, tr0.pos)
+		wood += r2.units
 		chops += 1
 		last = r2.event
 		if r2.event == "gone":
 			break
-	print("  the lying trunk (%.1f m) takes %d blows to harvest, ends with '%s', wood %d -> %d" % [tr0.length, chops, last, wood0, ts.inventory.get(ts.wood_name(tr0), 0)])
+	print("  the lying trunk (%.1f m) takes %d blows to harvest, ends with '%s', wood %d -> %d" % [tr0.length, chops, last, wood0, wood])
 	check(last == "gone" and ts.changed.get(tr0.id) == true, "the last blow takes the last piece and the trunk is gone for good")
-	check(ts.inventory.get(ts.wood_name(tr0), 0) > wood0 + 3, "chopping gives wood")
+	check(wood > wood0 + 3, "chopping gives wood")
 	# persistence: a rebuilt chunk keeps cut and fallen trees as they are
 	var other: TreeInst = a[1] if a.size() > 1 and a[1].id != tr0.id else a[0]
 	other.hits = 3.0
@@ -1637,15 +1644,17 @@ func _rock_break_tests() -> void:
 	rock.layers = [[cat.get_type("granite").id, 1.0], [cat.get_type("gold").id, 0.5]]
 	var rocks: Array = [rock]
 	var events: Array = []
+	var harvest := {}                                   # type key -> units, summed from the blows (the inventory lives elsewhere, see Harvester)
 	var hits := 0
 	while rocks.has(rock) and hits < 500:
 		var res := rs.hit(rock, rocks)
+		harvest[res.type] = harvest.get(res.type, 0) + res.units
 		hits += 1
 		if res.event != "hit":
 			events.append(res.event)
-	print("  granite shell + gold core, size 1: %d hits, events %s, harvest %s" % [hits, events, rs.inventory])
+	print("  granite shell + gold core, size 1: %d hits, events %s, harvest %s" % [hits, events, harvest])
 	check(events == ["shed", "broken"], "a layered rock loses its shell first, then breaks")
-	check(rs.inventory.get("granite", 0) > 0 and rs.inventory.get("gold", 0) > 0, "both layers are harvested")
+	check(harvest.get("granite", 0) > 0 and harvest.get("gold", 0) > 0, "both layers are harvested")
 	check(rs.changed.get(777) == true and not rocks.has(rock), "a broken rock is gone and remembered by its id")
 	# blows needed: far more for a big or solid rock
 	var hit_counts := {}
@@ -2026,3 +2035,232 @@ func _river_tests() -> void:
 			kinds += 1
 	print("  river chunk: %d water vertices, %d of river kind" % [uvs.size(), kinds])
 	check(kinds > 0, "a river chunk gets a river-water surface")
+
+## The survival layers (items, inventory, crafting, harvest): pure data + rules, no scene needed.
+func _survival_tests() -> void:
+	print("== survival: inventory, weight, crafting, harvest ==")
+	var kit := PlayerKit.new()
+	var inv := kit.inventory
+	check(kit.belt.tools == ["pickaxe", "bucket"], "the explorer starts with a pickaxe and a bucket")
+	check(is_equal_approx(inv.capacity_kg, 100.0), "the carry limit is 100 kg")
+	# weight limit: clay is 1.5 kg a unit, so 66 units (99 kg) fit and the 67th does not
+	var got := inv.add("clay", 100)
+	check(got == 66 and inv.count_of("clay") == 66, "only what weighs under 100 kg is picked up (got %d clay)" % got)
+	check(inv.weight() <= 100.0 and inv.add("clay", 1) == 0, "a full pack takes nothing more")
+	# bricks: four clay become one brick that is lighter (the clay dries), and it is the storable form
+	var opts := RecipeBook.options(inv)
+	var brick_opt: Dictionary = {}
+	for o: Dictionary in opts:
+		if o.recipe.id == "brick":
+			brick_opt = o
+	check(brick_opt.get("can", false) and brick_opt.out_id == "brick:clay", "with clay in the pack, a clay brick can be pressed")
+	var before := inv.weight()
+	var res := Crafter.craft(brick_opt, inv, kit.belt)
+	check(res.ok and inv.count_of("brick:clay") == 1 and inv.count_of("clay") == 62, "pressing a brick takes four clay and gives a brick")
+	check(inv.weight() < before, "a clay brick weighs less than the clay it was pressed from")
+	# a heavy ore makes a "gold brick": named after the material; one unit of gold is already a brick's worth
+	var gold := ItemDef.make("rock:gold", "Gold ore", ItemDef.RESOURCE, 7.4, Color.GOLD, "lump", ["rock", "ore", "brickable"])
+	ItemCatalog.register(gold)
+	var gb := ItemCatalog.brick_of("rock:gold")
+	check(gb.name == "Gold brick" and is_equal_approx(gb.unit_kg, 7.4) and ItemCatalog.brick_cost(gold) == 1, "one unit of gold ore presses into a gold brick (%s, %.1f kg), carryable" % [gb.name, gb.unit_kg])
+	# the torch: wood + a fuel, never craftable without them
+	var inv2 := Inventory.new()
+	var kit2 := PlayerKit.new()
+	var wood := ItemDef.make("wood:Oak wood", "Oak wood", ItemDef.RESOURCE, 1.0, Color.SADDLE_BROWN, "log", ["wood"])
+	var coal := ItemDef.make("rock:coal", "Coal", ItemDef.RESOURCE, 1.0, Color.BLACK, "lump", ["rock", "brickable", "flammable"])
+	ItemCatalog.register(wood)
+	ItemCatalog.register(coal)
+	var torch_craft := func(i: Inventory, id: String) -> Dictionary:
+		for o: Dictionary in RecipeBook.options(i):
+			if o.recipe.id == id:
+				return o
+		return {}
+	check(not torch_craft.call(inv2, "torch_fuel").can and not torch_craft.call(inv2, "torch_bundle").can, "with an empty pack no torch can be made, but the recipes are listed")
+	kit2.inventory.add("wood:Oak wood", 1)
+	check(not torch_craft.call(kit2.inventory, "torch_fuel").can, "wood alone does not make a fuel torch")
+	kit2.inventory.add("rock:coal", 1)
+	var r2 := Crafter.craft(torch_craft.call(kit2.inventory, "torch_fuel"), kit2.inventory, kit2.belt)
+	check(r2.ok and kit2.belt.count_of("torch") == 2 and kit2.inventory.count_of("wood:Oak wood") == 0, "a stick and coal make two torches, which go on the tool belt")
+	kit2.inventory.add("wood:Oak wood", 3)
+	check(Crafter.craft(torch_craft.call(kit2.inventory, "torch_bundle"), kit2.inventory, kit2.belt).ok and kit2.belt.count_of("torch_bundle") == 1 and kit2.belt.count_of("torch") == 2, "three wood bind into a bundle torch without fuel: a different torch from the fuel ones")
+	# planting uses a torch up; the last one leaves the belt and the next tool is taken in hand
+	kit2.belt.select_id("torch")
+	check(kit2.belt.torch_to_plant() == "torch", "the torch in hand is the one planted")
+	kit2.belt.remove("torch")
+	check(kit2.belt.count_of("torch") == 1 and kit2.belt.current_id() == "torch", "planting one of two fuel torches leaves one, still in hand")
+	kit2.belt.select_id("pickaxe")
+	check(kit2.belt.torch_to_plant() == "torch", "with the pickaxe in hand the first torch on the belt is planted")
+	kit2.belt.remove("torch", 1)
+	check(kit2.belt.count_of("torch") == 0 and not kit2.belt.tools.has("torch") and kit2.belt.torch_to_plant() == "torch_bundle", "the last fuel torch leaves the belt, the bundle torch is next")
+	check(ToolCatalog.get_def("torch").burn_seconds > ToolCatalog.get_def("torch_bundle").burn_seconds and ToolCatalog.get_def("torch").model_path != ToolCatalog.get_def("torch_bundle").model_path, "the two torches burn for different times and have different models")
+	# torches burn down: only the piece in hand burns, a planted one keeps its fuel, nothing burns forever
+	var kit3 := PlayerKit.new()
+	kit3.belt.add("torch", 1, 300.0)
+	kit3.belt.add("torch", 1, 900.0)
+	check(kit3.belt.count_of("torch") == 2 and is_equal_approx(kit3.belt.fuel_left("torch"), 300.0), "a bundle torch starts with 5 minutes, a coal torch with 15")
+	kit3.belt.select_id("torch")
+	kit3.update(100.0)
+	check(is_equal_approx(kit3.belt.fuel_left("torch"), 200.0) and is_equal_approx(kit3.belt.fuel[("torch")][1], 900.0), "only the torch in hand burns")
+	kit3.belt.select_id("pickaxe")
+	kit3.update(1000.0)
+	check(is_equal_approx(kit3.belt.fuel_left("torch"), 200.0), "a torch that is not in hand does not burn")
+	kit3.belt.select_id("torch")
+	kit3.update(250.0)
+	check(kit3.belt.count_of("torch") == 1 and is_equal_approx(kit3.belt.fuel_left("torch"), 900.0), "a torch that runs out is gone and the next one is in hand")
+	kit3.update(1000.0)
+	check(kit3.belt.count_of("torch") == 0 and kit3.belt.current_id() != "torch", "the last torch burns out and another tool is taken")
+	kit3.belt.add("torch", 1, 120.0)
+	check(is_equal_approx(kit3.belt.fuel_left("torch"), 120.0), "a picked up torch keeps the fuel it had")
+	check(PlacedTorches.stick_dir(Vector3.DOWN, Vector3.UP) == null and PlacedTorches.stick_dir(Vector3.UP, Vector3.UP) != null, "a torch cannot be planted in a ceiling, but stands on the floor")
+	# a result too heavy to carry puts everything back
+	ItemCatalog.register(ItemDef.make("heavy", "Heavy", ItemDef.RESOURCE, 1.0, Color.GRAY, "lump", ["brickable"]))
+	var heavy_brick := ItemCatalog.brick_of("heavy")
+	check(is_equal_approx(heavy_brick.unit_kg, 6.0), "a brick weighs about 6 kg of its material")
+	# stacks: slots merge, swap and hand back the rest
+	var inv4 := Inventory.new(3, 100.0)
+	inv4.add("clay", 5)
+	var held := inv4.click_slot(0, {})
+	check(held.count == 5 and inv4.count_of("clay") == 0, "a click takes the stack onto the cursor")
+	held = inv4.click_slot(1, held)
+	check(held.is_empty() and inv4.slots[1].count == 5, "a click on an empty slot puts it down")
+	inv4.add("sand", 2)
+	var sw := inv4.click_slot(1, {"id": "sand", "count": 2})
+	check(sw.id == "clay" and inv4.slots[1].id == "sand", "a click on another item swaps the stacks")
+	# the ground: soil is clay, sand beaches are sand, deep ground is the rock of the region
+	var gen := PlanetGenerator.new(1337)
+	var rs := RockSystem.new()
+	rs.setup(gen, 1337)
+	var hv := Harvester.new(Inventory.new())
+	hv.bind_world(gen, rs, null)
+	var col := Column.new()
+	var kinds := {}
+	for i in 600:
+		var d := PlanetGenerator.fibonacci_dir(i, 600)
+		gen.sample_column(d, col)
+		if col.height < 3.0:
+			continue
+		var surf := d * (WorldConfig.PLANET_RADIUS + col.height - 0.3)
+		var deep := d * (WorldConfig.PLANET_RADIUS + col.height - 8.0)
+		kinds[hv.from_ground(surf)] = true
+		kinds[hv.from_ground(deep)] = true
+	print("  what digging gives over 600 sites, near the surface and 8 m down: %s" % [kinds.keys()])
+	check(kinds.has("clay"), "digging soil gives clay")
+	var has_rock := false
+	for k: String in kinds:
+		if k.begins_with("rock:"):
+			has_rock = true
+	check(has_rock, "digging deep gives the rock of the region")
+	check(rs.catalog.get_type("coal").traits.get("flammable", 0.0) >= 0.5, "coal is a fuel (flammable)")
+	# trees that block the view fade as a whole; trees beside the view line do not
+	TreeMaterial.declare_globals()
+	var tf := TreeFade.new()
+	var tr := TreeInst.new()
+	tr.pos = Vector3.ZERO
+	tr.up = Vector3.UP
+	tr.height = 10.0
+	tr.trunk_r = 0.3
+	tr.canopy_r = 3.0
+	tr.shape = 123456
+	check(tf._blocks(tr, Vector3(-8, 6, 0), Vector3(8, 1, 0)), "a tree on the line from the camera to the player blocks the view")
+	check(tf._blocks(tr, Vector3(-8, 11, 0), Vector3(8, 6, 0)), "... also through its crown only")
+	check(not tf._blocks(tr, Vector3(-8, 6, 6), Vector3(8, 1, 6)), "a tree 6 m beside the line does not")
+	check(not tf._blocks(tr, Vector3(-8, 14, 0), Vector3(8, 14, 0)), "... nor one far below the line (the view passes above it)")
+	var fch := Chunk.new()
+	fch.position = Vector3(-8, -8, -8)
+	fch.trees = [tr]
+	var fchunks := {Vector3i(0, 0, 0): fch}
+	for i in 40:
+		tf.update(fchunks, Vector3(-8, 6, 0), Vector3(8, 1, 0), 0.016)
+	check(tf._level.size() == 1 and tf._level[TreeMeshes.fade_id(tr)] < 0.3, "a blocking tree fades out whole (level %.2f)" % tf._level.values()[0])
+	for i in 80:
+		tf.update(fchunks, Vector3(-8, 6, 6), Vector3(8, 1, 6), 0.016)
+	check(tf._level.is_empty(), "and comes back when it no longer blocks")
+	fch.free()
+	# the character model from Blender has every part the animation moves, and the feet are separate from the body
+	var cm := (load(PlayerCharacter.MODEL) as PackedScene).instantiate() as Node3D
+	var missing: Array = []
+	for n in ["Body", "EyeL", "EyeR", "ShineL", "ShineR", "Nose", "Sprout", "LeafL", "LeafR", "FootL", "FootR", "HandL", "HandR"]:
+		if cm.find_child(n, true, false) == null:
+			missing.append(n)
+	check(missing.is_empty(), "the character model has all its parts %s" % [missing])
+	check((cm.find_child("FootL", true, false) as Node3D).get_parent() == cm.find_child("Body", true, false).get_parent(), "the feet are not part of the body (no connection)")
+	cm.free()
+	for id in ["pickaxe", "bucket", "torch", "torch_bundle"]:
+		check(load(ToolCatalog.get_def(id).model_path) != null, "the %s model loads" % id)
+
+## Saving: what play changes goes to disk and comes back in a fresh game. (The save file is a test file, never the player's.)
+func _save_tests() -> void:
+	print("== saving ==")
+	SaveGame.path = "user://test_save.dat"
+	SaveGame.delete()
+	check(not SaveGame.exists(), "no save to begin with")
+	var g := PlanetGenerator.new(1337)
+	var w := VoxelWorld.new()
+	w.setup(g)
+	var sp := g.find_spawn()
+	var cc := VoxelWorld.world_to_chunk(sp)
+	for dz in range(-1, 2):
+		for dy in range(-1, 2):
+			for dx in range(-1, 2):
+				w._ensure_chunk(cc + Vector3i(dx, dy, dz))
+	var up := sp.normalized()
+	var h := w.raycast(sp, -up, 40.0)
+	var pt: Vector3 = h.point
+	var probe := pt - up * 1.0
+	check(w.density_at(probe) > 0.0, "(the ground is solid there before the dig)")
+	w.carve(pt, 2.5)
+	check(w.density_at(probe) < 0.0, "(the hole is dug)")
+	w.rocks.changed[77] = {"layers": [[1, 1.0]], "size": 0.8, "hits": 2.0, "bites": [Vector4(0.1, 0.2, 0.3, 0.4)]}
+	w.rocks.moved_index[Vector3i(1, 2, 3)] = [77]
+	w.trees.changed[88] = true
+	var player := BallPlayer.new()
+	player.position = pt + up * 0.6
+	player.spawn_pos = pt
+	var kit := PlayerKit.new()
+	ItemCatalog.register(ItemDef.make("rock:testium", "Testium", ItemDef.RESOURCE, 2.0, Color.RED, "lump", ["rock", "brickable"]))
+	kit.inventory.add("clay", 7)
+	kit.inventory.add("rock:testium", 3)
+	kit.belt.add("torch", 1, 120.0)
+	kit.bar_slot = 2
+	var torches := PlacedTorches.new()
+	torches._list.append({"node": null, "flame": null, "point": pt, "normal": up, "fuel": 77.0, "id": "torch"})
+	var snap := WorldSnapshot.new()
+	var data := snap.capture(w, player, kit, torches, {"sun_angle": 1.5, "season": 2.5, "playtime": 99.0})
+	check(SaveGame.write(data), "the save is written")
+	check(SaveGame.exists() and SaveGame.info().seed == 1337 and SaveGame.info().playtime == 99.0, "the menu can see it (seed, play time) without reading the world")
+	var back := SaveGame.read()
+	check(not back.is_empty(), "the save is read back")
+	# into a fresh game
+	var w2 := VoxelWorld.new()
+	w2.setup(g)
+	WorldSnapshot.restore_world(back, w2)
+	for dz in range(-1, 2):
+		for dy in range(-1, 2):
+			for dx in range(-1, 2):
+				w2._ensure_chunk(cc + Vector3i(dx, dy, dz))
+	check(w2.density_at(probe) < 0.0 and is_equal_approx(w2.density_at(probe), w.density_at(probe)), "the dug hole is still there in the new game")
+	check(w2.rocks.changed.has(77) and w2.rocks.changed[77].bites[0] == Vector4(0.1, 0.2, 0.3, 0.4) and w2.rocks.moved_index.has(Vector3i(1, 2, 3)) and w2.trees.changed.get(88) == true, "the chipped rock, the moved rock and the cut tree are remembered")
+	var player2 := BallPlayer.new()
+	var kit2 := PlayerKit.new()
+	var torches2 := PlacedTorches.new()
+	var clock := WorldSnapshot.restore_player(back, player2, kit2, torches2)
+	check(player2.position.distance_to(player.position) < 0.001 and player2.spawn_pos.distance_to(pt) < 0.001, "he stands where he stood")
+	check(kit2.inventory.count_of("clay") == 7 and kit2.inventory.count_of("rock:testium") == 3 and kit2.bar_slot == 2, "he carries what he carried")
+	check(is_equal_approx(kit2.belt.fuel_left("torch"), 120.0) and kit2.belt.count_of("pickaxe") == 1, "his tools are back, the torch with the fuel it had left")
+	check(is_equal_approx(clock.sun_angle, 1.5) and is_equal_approx(clock.season, 2.5) and is_equal_approx(clock.playtime, 99.0), "the time of day, the season and the play time are back")
+	check(torches.to_data()[0].fuel == 77.0, "a planted torch is exported with its fuel")
+	# a second save with nothing dug must not copy the terrain again, and a corrupt file is refused
+	var again := snap.capture(w, player, kit, torches, {"sun_angle": 0.0, "season": 0.0, "playtime": 1.0})
+	check(again.edits == data.edits, "the terrain edits are shared between saves while they do not change")
+	var bad := FileAccess.open(SaveGame.path, FileAccess.WRITE)
+	bad.store_string("not a save")
+	bad.close()
+	check(SaveGame.read().is_empty(), "a damaged save is refused, not loaded")
+	SaveGame.delete()
+	SaveGame.path = "user://savegame.dat"
+	player.free()
+	player2.free()
+	torches.free()
+	torches2.free()
+	w.free()
+	w2.free()

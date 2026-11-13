@@ -338,6 +338,10 @@ static func _tri(m: Dictionary, a: Vector3, b: Vector3, c: Vector3, inside: Vect
 		f.append(b)
 		m.faces = f
 
+## The number baked into every vertex of a tree (UV.x): it tells the tree shader which tree a pixel belongs to (see TreeFade).
+static func fade_id(t: TreeInst) -> float:
+	return _u(t.shape, 99)
+
 static func _u(h: int, n: int) -> float:
 	var v := SeedMix.splitmix64(h + n * 0x632BE59B)
 	return float((v >> 11) & ((1 << 53) - 1)) / 9007199254740992.0

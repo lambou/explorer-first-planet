@@ -1,12 +1,18 @@
 class_name OrbitCamera
 extends Camera3D
-## Third-person camera whose "up" is always the planet's radial direction.
+## Third-person camera whose "up" is always the planet's radial direction. It is made for walking about an open world:
+##   - it pivots on the character's BODY (not his feet) and a little AHEAD of him, along the way the camera faces, so he sits in the lower part
+##     of the screen and what lies in front of him (where the mouse points) is in view; the lead shrinks where the spot ahead is inside the ground;
+##   - it is TERRAIN-AWARE: it reads the slope of the ground ahead and tilts with it, so the view keeps the same angle to the GROUND (not to the
+##     horizon): facing a hill it drops lower and looks up the slope and over the crest (a camera held at a fixed angle to the horizon looks
+##     down onto the hillside like a wall), facing downhill it rises a little so the view is not a grazing one;
+##   - where its view is blocked it finds a clear one (raised, swung round, lowered along a tunnel) as before.
 
 var target: Node3D
 var fwd := Vector3.FORWARD
 var pitch := 0.45
 var locked := false           # ignore the mouse (reproducing a captured view)
-var distance := 8.0
+var distance := 9.0
 var _yaw_input := 0.0
 var _probe := SphereShape3D.new()
 var world: VoxelWorld          # terrain data: a second, collision-independent safety check
@@ -20,6 +26,16 @@ var tilt := 0.0                 # the view tilted UP from the ball (looking at t
 const MAX_TILT := 1.45
 const MAX_PITCH := 1.55         # straight down, almost
 const UNDERGROUND_MAX := 7.0
+const PIVOT_HEIGHT := 0.85      # the camera looks at this height above the ball's centre: the middle of the character's body
+const LEAD := 2.4               # metres ahead of the character the camera looks, on open ground
+const FOLLOW := 0.8             # how much of the slope ahead the camera's pitch follows (1 = the same angle to the ground as on the flat)
+const DROP_MAX := 0.5           # (radians) facing a hill the camera drops by at most this much ...
+const RISE_MAX := 0.3           # ... and facing downhill it rises by at most this much
+
+var _slope := 0.0               # the slope of the ground ahead (radians, uphill positive), smoothed
+var _slope_goal := 0.0
+var _slope_cd := 0.0
+var _lead := 0.0                # the lead in use (smoothed; shrinks when the spot ahead is inside the ground)
 
 func _ready() -> void:
 	near = 0.3
@@ -62,19 +78,22 @@ func _process(delta: float) -> void:
 		fwd = up.cross(Vector3.RIGHT)
 	fwd = fwd.normalized().rotated(up, _yaw_input)
 	_yaw_input = 0.0
-	var pivot := tp + up * 0.5
+	var cave := world != null and world.underground
+	_update_slope(tp, up, delta, cave)
+	var base_pitch := clampf(pitch - clampf(_slope * FOLLOW, -RISE_MAX, DROP_MAX), -0.2, MAX_PITCH)     # the pitch the player chose, tilted with the ground ahead
+	var pivot := tp + up * PIVOT_HEIGHT + fwd * _clear_lead(tp + up * PIVOT_HEIGHT, delta, cave)
 	var exclude: Array[RID] = []
 	if target is CollisionObject3D:
 		exclude.append((target as CollisionObject3D).get_rid())
 	# The player must always be able to see the ball. If the usual spot behind it is blocked (a hole, a shaft, a tunnel, a
 	# wall), the camera looks for the best clear view around the ball: raised up to straight above, swung round it, or lowered
 	# along a tunnel. It takes the one with the longest clear arm that stays closest to what the player chose, and glides there.
-	var arm0 := _arm(pivot, up, pitch, 0.0, dist, exclude)
+	var arm0 := _arm(pivot, up, base_pitch, 0.0, dist, exclude)
 	var goal := Vector2.ZERO
 	if arm0 < dist - 0.05:
 		_search_cd -= delta
 		if _search_cd <= 0.0 or not _has_goal:
-			_goal = _search(pivot, up, dist, exclude)
+			_goal = _search(pivot, up, base_pitch, dist, exclude)
 			_search_cd = 0.3
 			_has_goal = true
 		goal = _goal
@@ -82,7 +101,7 @@ func _process(delta: float) -> void:
 		_has_goal = false
 	_lift = lerpf(_lift, goal.x, 0.18)
 	_yaw_off = lerp_angle(_yaw_off, goal.y, 0.18)
-	var pt := clampf(pitch + _lift, -0.2, MAX_PITCH)
+	var pt := clampf(base_pitch + _lift, -0.2, MAX_PITCH)
 	var back := _back(up, pt, _yaw_off)
 	view_fwd = fwd.rotated(up, _yaw_off)
 	# Final safety sweep: the camera stops before any terrain, so its view never enters the ground.
@@ -116,6 +135,50 @@ func _process(delta: float) -> void:
 	if target is Node3D:
 		(target as Node3D).visible = reach > 0.45          # the ball stays visible unless the camera is practically inside it
 
+## The slope of the ground in front of the character (every 0.1 s), smoothed every frame; none in caves.
+func _update_slope(tp: Vector3, up: Vector3, delta: float, cave: bool) -> void:
+	_slope_cd -= delta
+	if _slope_cd <= 0.0:
+		_slope_cd = 0.1
+		_slope_goal = 0.0
+		if world != null and not cave:
+			var near_h := _ground_height(tp + fwd * 3.0, up)
+			var far_h := _ground_height(tp + fwd * 9.0, up)
+			if not is_nan(near_h) and not is_nan(far_h):
+				_slope_goal = clampf(atan2(far_h - near_h, 6.0), -0.9, 0.9)
+	_slope = lerpf(_slope, _slope_goal, 1.0 - exp(-delta * 3.0))
+
+## Height (along `up`, relative to the point's own height) of the ground surface above/below `q`: found in the terrain data, NAN if there is none near.
+func _ground_height(q: Vector3, up: Vector3) -> float:
+	var t := 8.0
+	if world.density_at(q + up * t) > 0.0:
+		return t                                         # the point is deep inside a rising hill: as steep as it gets
+	while t > -8.0:
+		var next := t - 1.0
+		if world.density_at(q + up * next) > 0.0:
+			var lo := next                               # solid
+			var hi := t                                  # air
+			for i in 5:
+				var mid := (lo + hi) * 0.5
+				if world.density_at(q + up * mid) > 0.0:
+					lo = mid
+				else:
+					hi = mid
+			return (lo + hi) * 0.5
+		t = next
+	return NAN
+
+## How far ahead of the character the camera looks: LEAD on open ground, less where that spot (or the air just short of it) is inside the ground.
+func _clear_lead(from: Vector3, delta: float, cave: bool) -> float:
+	var goal := 0.0 if cave else LEAD
+	if world != null and goal > 0.0:
+		while goal > 0.2 and (world.density_at(from + fwd * goal) > -0.4 or world.density_at(from + fwd * goal * 0.5) > -0.4):
+			goal *= 0.6
+		if goal <= 0.2:
+			goal = 0.0
+	_lead = lerpf(_lead, goal, 1.0 - exp(-delta * 4.0))
+	return _lead
+
 ## Is the camera, or a corner of its near plane, inside the ground or within CLEARANCE of it?
 const CLEARANCE := 0.25
 func _near_plane_blocked(pos: Vector3, pivot: Vector3, up: Vector3) -> bool:
@@ -141,19 +204,19 @@ func _arm(pivot: Vector3, up: Vector3, pt: float, yo: float, dist: float, exclud
 
 ## The best clear view around the ball: (raise, swing) relative to the player's own angle. Scores the length of the clear
 ## arm (capped at the wanted distance) and prefers little swing and little raise, so an open view is never given up lightly.
-func _search(pivot: Vector3, up: Vector3, dist: float, exclude: Array[RID]) -> Vector2:
+func _search(pivot: Vector3, up: Vector3, base: float, dist: float, exclude: Array[RID]) -> Vector2:
 	var best := Vector2.ZERO
 	var best_score := -1.0e9
 	for yo in [0.0, 0.8, -0.8, 1.6, -1.6, PI]:
 		for pa in [0.0, 0.4, 0.8, 1.2, 2.0, -0.3, -0.6]:
-			var pt := clampf(pitch + pa, -0.2, MAX_PITCH)
+			var pt := clampf(base + pa, -0.2, MAX_PITCH)
 			var arm := _arm(pivot, up, pt, yo, dist, exclude)
-			var score := minf(arm, dist) - 0.6 * absf(yo) - 0.9 * absf(pt - pitch)
+			var score := minf(arm, dist) - 0.6 * absf(yo) - 0.9 * absf(pt - base)
 			if arm >= dist - 0.05:
 				score += 1.0                               # a fully open view
 			if score > best_score:
 				best_score = score
-				best = Vector2(pt - pitch, yo)
+				best = Vector2(pt - base, yo)
 	return best
 
 ## Walks along the arm and tests the terrain *data* (not physics): works even where no collision shape

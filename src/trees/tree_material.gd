@@ -5,9 +5,9 @@ extends RefCounted
 ##    per-tree phase (UV.x), so a forest ripples instead of moving as one.
 ##  - LIGHT: lit by hand with the game's sun and ambient (like the grass), half-lambert so the shading is soft and cozy; night, dusk and the
 ##    underwater dimming reach the trees through the same values.
-##  - FADE: trees that stand between the camera and the player fade out in a dither (no sorting, no transparency cost), and a tree the
-##    camera is inside of fades too, so the player is never hidden by a trunk or a crown.
-## Shared uniforms: grass_wind / grass_sun / grass_sun_col (GrassMaterial), tree_cam = (camera position, fade radius), tree_target = player.
+##  - FADE: trees that block the view of the player fade out AS A WHOLE in a dither (no sorting, no transparency cost): TreeFade decides which
+##    trees, the shader recognises each by its id (UV.x, the same number in every vertex of a tree). Whatever is right at the camera fades too.
+## Shared uniforms: grass_wind / grass_sun / grass_sun_col (GrassMaterial), tree_cam = camera position, tree_fade_* = the fading trees (TreeFade).
 
 const CODE := """
 shader_type spatial;
@@ -17,7 +17,10 @@ global uniform vec4 grass_wind;
 global uniform vec4 grass_sun;
 global uniform vec4 grass_sun_col;
 global uniform vec4 tree_cam;
-global uniform vec4 tree_target;
+global uniform vec4 tree_fade_ids_a;
+global uniform vec4 tree_fade_ids_b;
+global uniform vec4 tree_fade_lv_a;
+global uniform vec4 tree_fade_lv_b;
 
 uniform float sway = 1.0;
 uniform float leaf_light = 1.0;
@@ -25,8 +28,10 @@ uniform float leaf_light = 1.0;
 varying vec3 v_col;
 varying vec3 v_n;
 varying vec3 v_pos;
+varying float v_id;
 
 void vertex() {
+	v_id = UV.x;                                   // which tree this vertex belongs to
 	vec3 wpos = (MODEL_MATRIX * vec4(VERTEX, 1.0)).xyz;
 	vec3 up = normalize(wpos);
 	vec3 wdir = grass_wind.xyz - up * dot(up, grass_wind.xyz);
@@ -56,24 +61,24 @@ float dither(vec2 p) {
 }
 
 void fragment() {
-	// fade what stands between the camera and the player, and what the camera is inside of (only the pixels near that line pay for it)
-	vec3 a = tree_cam.xyz;
-	vec3 ab = tree_target.xyz - a;
-	vec3 ap = v_pos - a;
-	float tt = clamp(dot(ap, ab) / max(dot(ab, ab), 0.0001), 0.0, 1.0);
-	vec3 off = ap - ab * tt;
-	float d2 = dot(off, off);
-	float near2 = dot(ap, ap);
-	float r = tree_cam.w;
-	if (d2 < r * r || near2 < 5.76) {
-		float alpha = 1.0;
-		if (tt < 0.97) {
-			alpha = smoothstep(r * 0.25, r, sqrt(d2));
-		}
+	// a tree that blocks the view fades whole (its id is in the list TreeFade publishes); anything right at the camera fades too
+	float alpha = 1.0;
+	vec4 da = abs(vec4(v_id) - tree_fade_ids_a);
+	vec4 db = abs(vec4(v_id) - tree_fade_ids_b);
+	if (da.x < 0.000002) { alpha = tree_fade_lv_a.x; }
+	if (da.y < 0.000002) { alpha = tree_fade_lv_a.y; }
+	if (da.z < 0.000002) { alpha = tree_fade_lv_a.z; }
+	if (da.w < 0.000002) { alpha = tree_fade_lv_a.w; }
+	if (db.x < 0.000002) { alpha = tree_fade_lv_b.x; }
+	if (db.y < 0.000002) { alpha = tree_fade_lv_b.y; }
+	if (db.z < 0.000002) { alpha = tree_fade_lv_b.z; }
+	if (db.w < 0.000002) { alpha = tree_fade_lv_b.w; }
+	float near2 = dot(v_pos - tree_cam.xyz, v_pos - tree_cam.xyz);
+	if (near2 < 5.76) {
 		alpha = min(alpha, smoothstep(0.5, 2.4, sqrt(near2)));
-		if (alpha < dither(FRAGCOORD.xy)) {
-			discard;
-		}
+	}
+	if (alpha < 0.999 && alpha < dither(FRAGCOORD.xy)) {
+		discard;
 	}
 	vec3 n = normalize(v_n);
 	if (!FRONT_FACING) {
@@ -103,3 +108,7 @@ static func declare_globals() -> void:
 	_declared = true
 	RenderingServer.global_shader_parameter_add("tree_cam", RenderingServer.GLOBAL_VAR_TYPE_VEC4, Vector4(0, 0, 0, 0))
 	RenderingServer.global_shader_parameter_add("tree_target", RenderingServer.GLOBAL_VAR_TYPE_VEC4, Vector4(0, 0, 0, 0))
+	for n in ["tree_fade_ids_a", "tree_fade_ids_b"]:
+		RenderingServer.global_shader_parameter_add(n, RenderingServer.GLOBAL_VAR_TYPE_VEC4, Vector4(0, 0, 0, 0))
+	for n in ["tree_fade_lv_a", "tree_fade_lv_b"]:
+		RenderingServer.global_shader_parameter_add(n, RenderingServer.GLOBAL_VAR_TYPE_VEC4, Vector4(1, 1, 1, 1))

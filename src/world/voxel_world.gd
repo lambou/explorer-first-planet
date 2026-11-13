@@ -469,6 +469,21 @@ func is_area_ready(pos: Vector3) -> bool:
 					return false
 	return true
 
+## How much of the ground the player needs to start (the same chunks is_area_ready asks for) is built, 0..1: the loading bar.
+func area_progress(pos: Vector3) -> float:
+	var cc := world_to_chunk(pos)
+	var need := 0
+	var have := 0
+	for dz in range(-2, 3):
+		for dy in range(-2, 3):
+			for dx in range(-2, 3):
+				var c := cc + Vector3i(dx, dy, dz)
+				if box_dist(c, pos) <= 22.0 and wants(c, pos):
+					need += 1
+					if chunks.has(c):
+						have += 1
+	return 1.0 if need == 0 else float(have) / need
+
 # ---------- water (all logic lives in src/water/, see WaterSystem) ----------
 func water_level_at(p: Vector3) -> float:
 	return water.water_level_at(chunks, p)
