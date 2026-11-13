@@ -1,15 +1,16 @@
 class_name MainMenu
 extends CanvasLayer
-## The first screen: the title, a seed field (empty = the usual world), Start and Quit, and the explorer turning on a little stage.
+## The first screen: the title, the saved worlds (play or delete one), a new-world form (name, seed: empty = the usual world), Quit, and the explorer turning on a little stage.
 ## Display only: it announces `start_requested(seed_text)`, Boot does the rest.
 
-signal start_requested(seed_text: String)      # a new game
-signal continue_requested                       # the saved game
+signal start_requested(world_name: String, seed_text: String)      # a new world
+signal continue_requested(world_id: String)                          # a saved world
 
 var _stage_model: Node3D
 var _seed: LineEdit
-var _start: Button
-var _armed := false                  # a saved game exists: the first click on New game only asks, the second replaces it
+var _name: LineEdit
+var _col: VBoxContainer
+var _worlds_box: VBoxContainer
 var _t := 0.0
 
 func _init() -> void:
@@ -80,42 +81,85 @@ func _init() -> void:
 	sub.add_theme_color_override("font_color", Color(0.15, 0.24, 0.35))
 	col.add_child(sub)
 	col.add_child(Control.new())
-	var has_save := SaveGame.exists()
-	var start := _button("New game" if has_save else "Start")
-	start.pressed.connect(_on_start)
-	_start = start
-	if has_save:
-		var info := SaveGame.info()
-		var cont := _button("Continue")
-		cont.tooltip_text = "Saved %s, seed %s" % [info.get("saved_at", "?"), info.get("seed", "?")]
-		cont.pressed.connect(func() -> void: continue_requested.emit())
-		col.add_child(cont)
-		var when := Label.new()
-		when.text = "Saved %s   (%d min played)" % [str(info.get("saved_at", "")).replace("T", " "), int(float(info.get("playtime", 0.0)) / 60.0)]
-		when.add_theme_font_size_override("font_size", 13)
-		when.add_theme_color_override("font_color", Color(0.15, 0.24, 0.35))
-		col.add_child(when)
-		cont.grab_focus()
-	col.add_child(start)
-	var row := HBoxContainer.new()
-	row.add_theme_constant_override("separation", 8)
-	col.add_child(row)
+	_col = col
+	_build_worlds()                   # (places the column once it has all its children)
+
+## The world list and the new-world form (rebuilt when a world is deleted).
+func _build_worlds() -> void:
+	if _worlds_box != null:
+		_worlds_box.queue_free()
+	_worlds_box = VBoxContainer.new()
+	_worlds_box.add_theme_constant_override("separation", 10)
+	_col.add_child(_worlds_box)
+	_col.move_child(_worlds_box, 3)
+	var worlds := SaveGame.list()
+	if not worlds.is_empty():
+		var head := Label.new()
+		head.text = "Worlds"
+		head.add_theme_font_size_override("font_size", 16)
+		head.add_theme_color_override("font_color", Color(0.15, 0.24, 0.35))
+		_worlds_box.add_child(head)
+		var scroll := ScrollContainer.new()
+		scroll.custom_minimum_size = Vector2(0, mini(worlds.size(), 4) * 62)
+		scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+		_worlds_box.add_child(scroll)
+		var list := VBoxContainer.new()
+		list.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		list.add_theme_constant_override("separation", 8)
+		scroll.add_child(list)
+		for w in worlds:
+			var row := HBoxContainer.new()
+			row.add_theme_constant_override("separation", 6)
+			list.add_child(row)
+			var play := _button("%s
+%s  ·  %d min" % [w.name, str(w.get("saved_at", "")).replace("T", " ").substr(0, 16), int(float(w.get("playtime", 0.0)) / 60.0)])
+			play.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+			play.add_theme_font_size_override("font_size", 15)
+			play.tooltip_text = "Seed %s" % str(w.get("seed", "?"))
+			play.pressed.connect(func() -> void: continue_requested.emit(w.id))
+			row.add_child(play)
+			var del := _button("Delete")
+			del.add_theme_font_size_override("font_size", 14)
+			del.pressed.connect(func() -> void:
+				if del.text == "Delete":
+					del.text = "Sure?"
+				else:
+					SaveGame.delete_world(w.id)
+					_build_worlds())
+			row.add_child(del)
+			if row.get_index() == 0:
+				play.grab_focus.call_deferred()
+	var new_head := Label.new()
+	new_head.text = "New world"
+	new_head.add_theme_font_size_override("font_size", 16)
+	new_head.add_theme_color_override("font_color", Color(0.15, 0.24, 0.35))
+	_worlds_box.add_child(new_head)
+	_name = LineEdit.new()
+	_name.placeholder_text = "World name (e.g. your name)"
+	_name.text_submitted.connect(func(_t: String) -> void: _on_start())
+	_worlds_box.add_child(_name)
+	var srow := HBoxContainer.new()
+	srow.add_theme_constant_override("separation", 8)
+	_worlds_box.add_child(srow)
 	_seed = LineEdit.new()
 	_seed.placeholder_text = "World seed (empty: the usual world)"
 	_seed.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_seed.text_submitted.connect(func(_t: String) -> void: _on_start())
-	row.add_child(_seed)
+	srow.add_child(_seed)
 	var rnd := Button.new()
 	rnd.text = "Random"
 	rnd.focus_mode = Control.FOCUS_NONE
 	rnd.pressed.connect(func() -> void: _seed.text = str(WorldConfig.random_seed()))
-	row.add_child(rnd)
+	srow.add_child(rnd)
+	var start := _button("Create world")
+	start.pressed.connect(_on_start)
+	_worlds_box.add_child(start)
+	if worlds.is_empty():
+		start.grab_focus.call_deferred()
 	var quit := _button("Quit")
 	quit.pressed.connect(func() -> void: get_tree().quit())
-	col.add_child(quit)
-	col.set_anchors_and_offsets_preset(Control.PRESET_CENTER_LEFT, Control.PRESET_MODE_MINSIZE, 90)     # placed once it has all its children
-	if not has_save:
-		start.grab_focus()
+	_worlds_box.add_child(quit)
+	_col.set_anchors_and_offsets_preset.call_deferred(Control.PRESET_CENTER_LEFT, Control.PRESET_MODE_MINSIZE, 90)
 
 static func _button(text: String) -> Button:
 	var b := Button.new()
@@ -125,11 +169,7 @@ static func _button(text: String) -> Button:
 	return b
 
 func _on_start() -> void:
-	if SaveGame.exists() and not _armed:
-		_armed = true
-		_start.text = "Click again: this replaces your saved game"
-		return
-	start_requested.emit(_seed.text)
+	start_requested.emit(_name.text, _seed.text)
 
 func _process(delta: float) -> void:
 	_t += delta

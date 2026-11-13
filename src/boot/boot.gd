@@ -19,6 +19,10 @@ func _ready() -> void:
 	for a in args:
 		if a.begins_with("--savefile="):
 			SaveGame.path = "user://" + a.substr(11)
+	if args.has("--continue") and not SaveGame.exists():
+		var worlds := SaveGame.list()                    # no --savefile: the most recently played world
+		if not worlds.is_empty():
+			SaveGame.select(worlds[0].id)
 	if args.has("--continue") and SaveGame.exists():
 		SaveGame.pending = SaveGame.read()
 		WorldConfig.world_seed = SaveGame.pending.seed
@@ -36,14 +40,15 @@ func _ready() -> void:
 		if a.begins_with("--autoclick="):
 			get_tree().create_timer(float(a.substr(12))).timeout.connect(func() -> void: _menu._on_start() if _menu != null else null)
 
-func _on_start(seed_text: String) -> void:
-	SaveGame.delete()                               # a new game replaces the saved one (the menu asked for confirmation)
+func _on_start(world_title: String, seed_text: String) -> void:
+	SaveGame.create(world_title)                    # a new world gets its own slot; the others stay untouched
 	SaveGame.pending = {}
 	if seed_text.strip_edges() != "":
 		WorldConfig.world_seed = WorldConfig.parse_seed(seed_text)           # a number or any text
 	_begin()
 
-func _on_continue() -> void:
+func _on_continue(id: String) -> void:
+	SaveGame.select(id)
 	var data := SaveGame.read()
 	if data.is_empty():
 		return
