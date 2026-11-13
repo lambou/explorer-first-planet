@@ -22,12 +22,13 @@ var hit_h := 1.0            # height of the notch above the foot
 var hit_dir := Vector3.RIGHT  # horizontal direction the notch faces
 # once fallen
 var axis := Vector3.RIGHT   # from the foot along the lying trunk
+var shift := Vector3.ZERO   # where the lying trunk's foot is, relative to `pos` (it moves when the ground under it is dug away)
 var length := 8.0           # trunk length when it fell
 var remaining := 8.0        # what is left after chopping (cut off from the tip end)
 var size := 0.4             # blocker radius for the grass placer (it keeps clear of the trunk)
 
 func to_state() -> Dictionary:
-	return {"hits": hits, "hit_h": hit_h, "hit_dir": hit_dir, "state": state, "axis": axis, "length": length, "remaining": remaining}
+	return {"hits": hits, "hit_h": hit_h, "hit_dir": hit_dir, "state": state, "axis": axis, "length": length, "remaining": remaining, "shift": shift}
 
 func apply_state(d: Dictionary) -> void:
 	hits = d.hits
@@ -37,3 +38,4 @@ func apply_state(d: Dictionary) -> void:
 	axis = d.axis
 	length = d.length
 	remaining = d.remaining
+	shift = d.get("shift", Vector3.ZERO)

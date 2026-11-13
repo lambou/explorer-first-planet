@@ -34,7 +34,7 @@ static func bake(trees: Array, catalog: TreeCatalog, origin: Vector3, lod: int =
 		if t.state == TreeInst.FALLING:
 			continue
 		# a standing tree sinks 30 cm into the ground: its flared foot never hangs in the air on a slope
-		var sink := t.up * 0.3 if t.state == TreeInst.STANDING else Vector3.ZERO
+		var sink := t.up * 0.3 if t.state == TreeInst.STANDING else (-t.shift if t.state == TreeInst.FALLEN else Vector3.ZERO)
 		_add_tree(m, t, catalog.by_id(t.type_id), t.pos - origin - sink)
 	return m
 
@@ -90,11 +90,11 @@ static func _trunk_standing(m: Dictionary, t: TreeInst, ty: TreeType, base: Vect
 	var notch := t.hits > 0.0 and not far
 	var depth := 0.0
 	if notch:
-		depth = clampf(0.15 + 0.7 * t.hits / maxf(_need(ty, t), 1.0), 0.0, 0.88)
+		# a wedge bitten into the trunk: clearly visible from the first blow, deeper with every one
+		depth = clampf(0.4 + 0.55 * t.hits / maxf(_need(ty, t), 1.0), 0.0, 0.93)
 		var hh := clampf(t.hit_h, 0.4, top - 0.5)
-		heights.append(hh - 0.3)
-		heights.append(hh)
-		heights.append(hh + 0.3)
+		for dh in [-0.45, -0.18, 0.0, 0.18, 0.45]:
+			heights.append(hh + dh)
 		heights.sort()
 	var hit_angle := atan2(t.hit_dir.dot(az), t.hit_dir.dot(ax))
 	var bark := ty.bark
@@ -112,8 +112,8 @@ static func _trunk_standing(m: Dictionary, t: TreeInst, ty: TreeType, base: Vect
 			var a := TAU * i / SIDES
 			var cut := 0.0
 			if notch:
-				var bump := maxf(0.0, 1.0 - absf(hk - clampf(t.hit_h, 0.4, top - 0.5)) / 0.32)
-				var face := pow(maxf(0.0, cos(a - hit_angle)), 2.0)
+				var bump := clampf((0.45 - absf(hk - clampf(t.hit_h, 0.4, top - 0.5))) / 0.27, 0.0, 1.0)      # flat bottom, sloped sides
+				var face := clampf(cos(a - hit_angle) * 1.5 - 0.3, 0.0, 1.0)                                    # about 150 degrees wide
 				cut = depth * bump * face
 			radii.append(r0 * flare * (1.0 - cut))
 			var c := bark.lerp(bark.darkened(0.25), f * 0.4)

@@ -22,7 +22,12 @@ func after_edit(center: Vector3, radius: float) -> int:
 		var ch: Chunk = world.chunks[c]
 		if ch.trees.is_empty() or (ch.position + Vector3.ONE * 8.0).distance_to(center) > radius + 26.0:
 			continue
+		var settled := false
 		for t: TreeInst in ch.trees.duplicate():
+			if t.state == TreeInst.FALLEN:
+				if _near_trunk(t, center, radius + 1.5) and _settle_fallen(t):
+					settled = true
+				continue
 			if t.state != TreeInst.STANDING or t.pos.distance_to(center) > radius + 2.0:
 				continue
 			if _rooted(t):
@@ -33,7 +38,63 @@ func after_edit(center: Vector3, radius: float) -> int:
 				away = t.hit_dir
 			start_fall(t, ch, away.normalized())
 			started += 1
+		if settled:
+			world.rebake_trees(ch)
 	return started
+
+func _near_trunk(t: TreeInst, center: Vector3, dist: float) -> bool:
+	var a := t.pos + t.shift
+	var ab := t.axis * t.remaining
+	var k := clampf((center - a).dot(ab) / maxf(ab.length_squared(), 0.0001), 0.0, 1.0)
+	return (a + ab * k).distance_to(center) <= dist
+
+## Underside samples of a lying trunk (distance along it) that touch solid ground, for a foot at `foot` and direction `axis`.
+func _contacts(t: TreeInst, foot: Vector3, axis: Vector3) -> Array:
+	var out := []
+	var n := maxi(2, ceili(t.remaining / 0.6))
+	for i in n + 1:
+		var s := t.remaining * i / float(n)
+		if world.density_at(foot + axis * s - t.up * 0.15) > 0.0:
+			out.append(s)
+	return out
+
+## A lying trunk whose ground was dug away sinks until it rests again: straight down while nothing holds it, then, if only one end
+## touches, it tips about that end until the other end finds ground too. Returns true if it moved.
+func _settle_fallen(t: TreeInst) -> bool:
+	var foot := t.pos + t.shift
+	var axis := t.axis
+	if _contacts(t, foot, axis).size() >= 2:
+		return false                                            # held in two places (a log bridging a hole stays)
+	var found := false
+	for i in 50:
+		if not _contacts(t, foot, axis).is_empty():
+			found = true
+			break
+		foot -= t.up * 0.2
+	if not found:
+		return false                                            # nothing below within reach: leave it
+	var c := _contacts(t, foot, axis)
+	if c.size() == 1:
+		var pivot_s: float = c[0]
+		var pivot := foot + axis * pivot_s
+		var sgn := -1.0 if pivot_s > t.remaining * 0.5 else 1.0
+		var rot := axis.cross(-t.up)
+		if rot.length() > 0.01:
+			rot = rot.normalized()
+			for i in 25:
+				var ang := sgn * 0.04
+				axis = axis.rotated(rot, ang).normalized()
+				foot = pivot + (foot - pivot).rotated(rot, ang)
+				var far := false
+				for s: float in _contacts(t, foot, axis):
+					if absf(s - pivot_s) > 0.9:
+						far = true
+				if far:
+					break
+	t.axis = axis
+	t.shift = foot - t.pos
+	world.trees.changed[t.id] = t.to_state()
+	return true
 
 ## Is the foot still held by the ground? Five points under the trunk's footprint: at least two must be solid (a tree on the edge of a
 ## hole stays, a tree over a hole falls).

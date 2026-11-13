@@ -42,7 +42,7 @@ func update(chunks: Dictionary, cam_pos: Vector3, target: Vector3, delta: float)
 
 func _blocks(t: TreeInst, a: Vector3, b: Vector3) -> bool:
 	if t.state == TreeInst.FALLEN:
-		return _seg_dist(a, b, t.pos, t.pos + t.axis * t.remaining) < t.trunk_r + 0.3
+		return _seg_dist(a, b, t.pos + t.shift, t.pos + t.shift + t.axis * t.remaining) < t.trunk_r + 0.3
 	if t.state != TreeInst.STANDING:
 		return false
 	var top := t.pos + t.up * (t.height * 0.7)

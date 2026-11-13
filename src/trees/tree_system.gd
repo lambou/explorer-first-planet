@@ -81,7 +81,7 @@ static func ray_trees(chunks: Dictionary, origin: Vector3, dir: Vector3, max_dis
 			if t.state == TreeInst.FALLEN:
 				d = t.axis
 				len = t.remaining
-				a = t.pos + t.up * t.trunk_r * 0.9
+				a = t.pos + t.shift + t.up * t.trunk_r * 0.9
 			var hit := _ray_cylinder(origin, dir, a, d, len, r, best_t)
 			if hit.x >= 0.0:
 				best_t = hit.x
@@ -154,6 +154,7 @@ func hit(res: Dictionary, from: Vector3) -> Dictionary:
 func landed(t: TreeInst, axis: Vector3) -> void:
 	t.state = TreeInst.FALLEN
 	t.axis = axis
+	t.shift = Vector3.ZERO
 	t.length = t.height * 0.88
 	t.remaining = t.length
 	t.hits = 0.0
