@@ -962,7 +962,10 @@ func _camtest_step() -> void:
 	var jump := cam.global_position.distance_to(_ct_prev) if _ct_prev != Vector3.ZERO else 0.0
 	_ct_prev = cam.global_position
 	var line := "CT f%03d ph%d  cam %.2f m from ball, %+.2f up  jump %.2f  lift %+.2f yaw_off %+.2f goal %s  to-rock %+.0f deg  ball %s" % [_ct_t, _ct_phase, back.length(), back.dot(up), jump, cam._lift, rad_to_deg(cam._yaw_off), ("search" if cam._has_goal else "-"), rad_to_deg(ang), ("visible" if player.visible else "HIDDEN")]
-	print(line + "   [" + cam.dbg + "]")
+	var cres := world.raycast(cam.global_position, -cam.global_transform.basis.z, 60.0)
+	if cres.hit and _ct_t % 20 == 0:
+		print("CT marker (screen centre) lands %.2f m from the ball" % player.global_position.distance_to(cres.point))
+		print(line + "   [" + cam.dbg + "]")
 	if _ct_t % 4 == 0:
 		get_viewport().get_texture().get_image().save_png("%s_%d_%03d.png" % [prefix, _ct_phase, _ct_t])
 	if (_ct_phase == 1 and _ct_t > 400) or (_ct_phase == 2 and _ct_t > 40 * int(_repro.get("blows", 3)) + 40):

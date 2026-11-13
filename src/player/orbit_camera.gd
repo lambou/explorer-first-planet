@@ -28,7 +28,7 @@ const MAX_PITCH := 1.55         # straight down, almost
 const UNDERGROUND_MAX := 7.0
 const PIVOT_HEIGHT := 0.85      # the camera looks at this height above the ball's centre: the middle of the character's body
 const GOAL_HOLD := 0.6          # seconds the plain view must stay open before a search result is dropped (no flicker at an obstacle's edge)
-const LEAD := 2.4               # metres ahead of the character the camera looks, on open ground
+const LEAD := 0.8               # metres ahead of the character the camera looks, on open ground
 const FOLLOW := 0.8             # how much of the slope ahead the camera's pitch follows (1 = the same angle to the ground as on the flat)
 const DROP_MAX := 0.5           # (radians) facing a hill the camera drops by at most this much ...
 const RISE_MAX := 0.3           # ... and facing downhill it rises by at most this much
