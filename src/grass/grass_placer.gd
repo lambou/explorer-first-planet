@@ -105,7 +105,7 @@ static func place(gen: PlanetGenerator, field: GrassField, coord: Vector3i, dens
 				var a := clim[cu + 3 * cv].lerp(clim[cu + 1 + 3 * cv], fu - cu)
 				var b := clim[cu + 3 * (cv + 1)].lerp(clim[cu + 1 + 3 * (cv + 1)], fu - cu)
 				var m: Vector2 = a.lerp(b, fv - cv)
-				var pick := field.choose(ground, m.x, m.y, p, slope, _unit(h, 3))
+				var pick := field.choose(ground, m.x, m.y, p, slope, _unit(h, 3), _shade_at(p, rocks))
 				tid = int(pick.x)
 				chance = pick.y
 			if tid < 0 or _unit(h, 4) > chance:
@@ -139,6 +139,20 @@ static func place(gen: PlanetGenerator, field: GrassField, coord: Vector3i, dens
 		var hi: Vector3 = his[tid] + Vector3(1.0, 1.0, 1.0) + Vector3.ONE * field.catalog.by_id(tid).height_max
 		out[tid] = {"buf": buf, "count": buf.size() / STRIDE, "aabb": AABB(lo, hi - lo)}
 	return out
+
+## 0..1: how much of a tree's crown shades this spot (the crowns of the chunk's trees, in the plane of the ground).
+static func _shade_at(p: Vector3, blockers: Array) -> float:
+	var shade := 0.0
+	for b in blockers:
+		if not ("canopy_r" in b):
+			continue
+		var off: Vector3 = p - b.pos
+		off -= b.up * off.dot(b.up)
+		var d := off.length()
+		var rc: float = b.canopy_r
+		if d < rc:
+			shade = maxf(shade, 1.0 - smoothstep(rc * 0.45, rc, d))
+	return shade
 
 static func _unit(h: int, n: int) -> float:
 	var v := SeedMix.splitmix64(h + n * 0x632BE59B)

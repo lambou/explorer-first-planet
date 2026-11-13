@@ -320,6 +320,7 @@ func update_center(pos: Vector3) -> void:
 	_sort_queue()
 
 func _process(_delta: float) -> void:
+	_collect_cuts()
 	_mutex.lock()
 	_ready.append_array(_done)
 	_done.clear()
@@ -644,8 +645,51 @@ func rock_ray(origin: Vector3, dir: Vector3, max_dist: float) -> Dictionary:
 func hit_rock(res: Dictionary, power: float = 1.0) -> Dictionary:
 	var ch: Chunk = res.chunk
 	var out := rocks.hit(res.rock, ch.rocks, power, res.point)
-	ch.apply_rocks(RockMesher.bake(ch.rocks, rocks.catalog, ch.position, ch.dens, ch.base), material)
+	ch.apply_rocks(RockMesher.bake(ch.rocks, rocks.catalog, ch.position, ch.dens, ch.base), material)     # the quick shape right now ...
+	var rock: RockInst = res.rock
+	if out.event == "hit" and not rock.bites.is_empty():
+		_request_cut(ch.coord, rock)                                                                      # ... the evenly meshed one a moment later
 	return out
+
+# the re-meshed shapes of bitten rocks are built on a worker (RockCut); the old shape stays until the new one is ready
+var _cut_busy := {}                  # rock id -> true while a job runs
+var _cut_done: Array = []
+var _cut_mutex := Mutex.new()
+
+func _request_cut(coord: Vector3i, r: RockInst) -> void:
+	if _cut_busy.has(r.id):
+		return                        # a job is running: when it returns it sees the rock changed again and asks once more
+	_cut_busy[r.id] = true
+	var copy := RockInst.from_state(r.to_state())
+	copy.bites = r.bites.duplicate()
+	WorkerThreadPool.add_task(_cut_job.bind(coord, copy))
+
+func _cut_job(coord: Vector3i, copy: RockInst) -> void:
+	var cut := RockCut.build(copy, rocks.catalog)
+	_cut_mutex.lock()
+	_cut_done.append({"coord": coord, "id": copy.id, "cut": cut, "sig": copy.bites.hash()})
+	_cut_mutex.unlock()
+
+func _collect_cuts() -> void:
+	if _cut_done.is_empty():
+		return
+	_cut_mutex.lock()
+	var list := _cut_done
+	_cut_done = []
+	_cut_mutex.unlock()
+	for d in list:
+		_cut_busy.erase(d.id)
+		var ch: Chunk = chunks.get(d.coord)
+		if ch == null:
+			continue
+		for r: RockInst in ch.rocks:
+			if r.id == d.id and not r.bites.is_empty():
+				if r.bites.hash() == d.sig:
+					r.cut = d.cut
+					r.cut_sig = d.sig
+					rebake_rocks(ch)
+				else:
+					_request_cut(d.coord, r)             # struck again while it was being built
 
 ## Ray march against the density field. Returns {hit, point, prev}.
 func raycast(origin: Vector3, dir: Vector3, max_dist: float) -> Dictionary:

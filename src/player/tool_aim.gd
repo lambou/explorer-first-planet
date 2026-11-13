@@ -10,6 +10,7 @@ const REACH := 4.5                 # metres from the ball: the arm's length; not
 const GROUND_RADIUS := 2.4         # what one dig removes (same as VoxelWorld.carve in main)
 const MAX_RAY := 70.0
 const SEGS := 28                   # points around the patch
+const SEGS_ROCK := 18              # a rock needs a surface search per point: fewer points
 const RINGS := [0.5, 0.9, 1.0]     # radii of the point rings (fractions of the patch radius): fill, outline inner edge, outline outer edge
 
 var _mi: MeshInstance3D
@@ -138,10 +139,11 @@ func _build_patch(world: VoxelWorld, t: Dictionary) -> void:
 	var rock: RockInst = t.rock if is_rock else null
 	var frame := RockMesher.frame_of(rock) if is_rock else {}
 	var rings: Array = []                       # per ring: PackedVector3Array (local to the target; INF = no surface there)
+	var segs := SEGS_ROCK if is_rock else SEGS
 	for k in RINGS.size():
 		var ring := PackedVector3Array()
-		for i in SEGS:
-			var a := TAU * i / SEGS
+		for i in segs:
+			var a := TAU * i / segs
 			var p0 := centre + (tx * cos(a) + tz * sin(a)) * rad * float(RINGS[k])
 			ring.append(_on_cylinder(p0, t, centre) if is_tree else _on_surface(world, p0, n, rock, frame, centre))
 		rings.append(ring)
@@ -149,14 +151,14 @@ func _build_patch(world: VoxelWorld, t: Dictionary) -> void:
 	# translucent area: a fan from the centre to the first ring, then the band to the second
 	var fill := PackedVector3Array()
 	var c0 := n * 0.04
-	for i in SEGS:
-		var j := (i + 1) % SEGS
+	for i in segs:
+		var j := (i + 1) % segs
 		_tri(fill, c0, rings[0][i], rings[0][j])
 		_quad(fill, rings[0][i], rings[0][j], rings[1][j], rings[1][i])
 	# bright outline: the band between the last two rings
 	var line := PackedVector3Array()
-	for i in SEGS:
-		var j := (i + 1) % SEGS
+	for i in segs:
+		var j := (i + 1) % segs
 		_quad(line, rings[1][i], rings[1][j], rings[2][j], rings[2][i])
 	_draw(fill, _fill)
 	_draw(line, _line)
@@ -195,11 +197,26 @@ func _on_cylinder(p0: Vector3, t: Dictionary, centre: Vector3) -> Vector3:
 ## little off the surface so it does not flicker against it. Vector3.INF where there is no surface to be found.
 func _on_surface(world: VoxelWorld, p0: Vector3, n: Vector3, rock: RockInst, frame: Dictionary, centre: Vector3) -> Vector3:
 	if rock != null:
-		# a rock is star-shaped around its centre: along the direction from the centre the surface is one lookup
-		var w := (p0 - rock.pos).normalized()
-		var wl := Vector3(w.dot(frame.x), w.dot(frame.y), w.dot(frame.z))
-		var l := RockMesher.surface_radius(rock, frame, wl)
-		return rock.pos + w * (l + 0.03) - centre
+		# the rock's REAL surface under this point: look along the target's normal, from above the rock to below it (a ray from the rock's
+		# centre folds the patch into a fan as soon as the rock has a crater)
+		var span := maxf(rock.size * 0.8, 0.5)
+		var from := p0 + n * span
+		var steps := 8
+		var prev := 0.0
+		for i in range(1, steps + 1):
+			var tt := span * 2.0 * i / steps
+			if RockMesher._inside(rock, frame, from - n * tt):
+				var lo := prev
+				var hi := tt
+				for k in 3:
+					var mid := (lo + hi) * 0.5
+					if RockMesher._inside(rock, frame, from - n * mid):
+						hi = mid
+					else:
+						lo = mid
+				return from - n * ((lo + hi) * 0.5) + n * 0.03 - centre
+			prev = tt
+		return Vector3.INF
 	var step := 0.3
 	var s := 0.0
 	if world.density_at(p0) > 0.0:

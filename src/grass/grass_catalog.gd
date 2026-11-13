@@ -16,6 +16,7 @@ const TABLE := [
 	["daisy", "Daisies", 0.16, 0.30, 4, 0.18, 0.010, 0.90, "5da636", "fbfbf2", 1.1, false, true],
 	["pinkflower", "Pink flowers", 0.14, 0.26, 4, 0.18, 0.010, 0.90, "5da636", "f59ac2", 1.1, false, true],
 	["bluebell", "Bluebells", 0.18, 0.32, 4, 0.16, 0.010, 0.90, "5da636", "8fa4f2", 1.1, false, true],
+	["fern", "Ferns", 0.22, 0.40, 11, 0.20, 0.060, 0.85, "3f8a3a", "86d060", 0.8, false, false],     # the forest floor: wide arching fronds, they like shade
 ]
 
 var world_seed := 0

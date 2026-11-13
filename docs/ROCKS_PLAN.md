@@ -62,6 +62,15 @@ as debris and vanish), obeying gravity. Seed-related and coherent. Must not cost
   left of the rock (volume under the surface) close to the blows left, however the player aims: a bite that took too
   little digs on, one that took too much is cut back. The last blow removes the remnant, and a rock with almost
   nothing left is gone. A shell is bitten the same way; on its last blow it falls away and leaves the core.
+* R4f (done): FARMING A ROCK, first blow to last, checked blow by blow (`--seq=prefix` launch option saves a picture and the numbers after every blow).
+  Found and fixed: (1) sliding the vertices of the whole sphere into a bite bunched them into thin fans (5-8% slivers) and showed as spikes;
+  (2) pressing them out of the bite made the rock GROW; (3) sliding along the bite axis stretched the crater walls. The fix is a real re-mesh:
+  a bitten rock is turned into a density field (lumpy blob minus the bite spheres, rims rounded with a smooth minimum, grid scaled to the
+  rock so a bite is ~2.5 cells wide) and meshed with Surface Nets (`RockCut`), tiny floating shards dropped. Result: about 1-2% slivers, the
+  triangle count follows the rock down (2640 -> 1500 -> 820 -> 427 -> a few), nothing outside the original rock. It is built on a worker
+  thread (140-250 ms for a big rock); the quick ray-based shape shows for the first frames, then the re-meshed one swaps in. Also fixed:
+  inverted normals on the cut shape (found by the new test), fresh-fracture colour spilling over the whole rock (now only on the crater floor),
+  and the aim patch folding into a wedge fan on a cratered rock (it now looks for the real surface along the target's normal).
 * R4e (done): REACH. The tool only reaches 4.5 m from the ball (red ring and refused blows beyond it), for rocks and for the ground.
 * R6 (done): GRAVITY. Every surface rock is either FIXED (partly sunk into the floor: it bends the floor, never moves) or LOOSE
   (it rests on top: a rigid body). The check is event driven: when the ground is dug / filled, only the loose rocks

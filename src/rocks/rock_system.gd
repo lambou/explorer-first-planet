@@ -7,7 +7,8 @@ extends RefCounted
 
 const UNITS_PER_AREA := 3.0       # harvest units of a 1 m rock
 const MAX_BITES := 48             # bites kept per rock (blows on the same spot widen one bite)
-const MIN_LEFT := 0.025           # a rock with less than this left of it is gone
+const LAST_LEFT := 0.2             # the last blow finds a chunky piece (about a fifth of the rock) to remove, never a tiny stump
+const MIN_LEFT := 0.08            # a rock with less than this left of it is gone (never a tiny stump)
 const TOLERANCE := 0.06           # how much more rock than "blows left" may remain before the bite digs on
 const TOL_LOW := 0.03             # ... and how much less may remain (a bite that takes more is cut back)
 
@@ -86,6 +87,10 @@ func build_chunk(coord: Vector3i, base_dens: PackedFloat32Array, wlev: PackedFlo
 		var m2 = changed_snap.get(id)
 		if m2 is Dictionary and m2.has("state"):
 			rocks.append(RockInst.from_state(m2.state))
+	for r: RockInst in rocks:
+		if not r.bites.is_empty():
+			r.cut = RockCut.build(r, catalog)             # a chunk that holds a bitten rock builds its re-meshed shape here (worker thread)
+			r.cut_sig = r.bites.hash()
 	var origin := Vector3(coord * WorldConfig.CHUNK_SIZE)
 	return {"rocks": rocks, "mesh": RockMesher.bake(rocks, catalog, origin, dens, base_dens)}
 
@@ -126,7 +131,7 @@ func hit(r: RockInst, rocks: Array, power: float = 1.0, point: Vector3 = Vector3
 			var full: Vector4 = r.bites[idx]
 			var start: Vector4 = before[idx] if merged else Vector4(full.x, full.y, full.z, 0.0)
 			# coherence: what is left of the rock follows the blows left.
-			var expected := 1.0 - r.wear
+			var expected := 1.0 - r.wear * (1.0 - LAST_LEFT)         # the blows left decide how much rock is left, but never less than LAST_LEFT before the last blow
 			var left := RockMesher.volume_fraction(r)
 			if left < expected - TOL_LOW:
 				# the bite took too much (the blow landed where it cut deep): take only part of it
@@ -164,6 +169,7 @@ func hit(r: RockInst, rocks: Array, power: float = 1.0, point: Vector3 = Vector3
 		r.hits = 0.0
 		r.wear = 0.0
 		r.bites = []
+		r.cut = {}
 		changed[r.id] = _entry(r)
 		out.event = "shed"
 		out.colors = [t.color, catalog.by_id(r.layers[0][0]).color]

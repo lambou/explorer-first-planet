@@ -58,7 +58,7 @@ func fine_at(p: Vector3) -> float:
 
 ## The kind of grass for one planting spot and the chance it gets planted (0..1), or [-1, 0].
 ## ground: the ground colour; moisture / temperature 0..1; p: world position; slope: rise over run; r: a random 0..1.
-func choose(ground: Color, moisture: float, temperature: float, p: Vector3, slope: float, r: float) -> Vector2:
+func choose(ground: Color, moisture: float, temperature: float, p: Vector3, slope: float, r: float, shade: float = 0.0) -> Vector2:
 	var g := grassiness(ground)
 	if g < 0.04:
 		return Vector2(-1.0, 0.0)
@@ -75,7 +75,13 @@ func choose(ground: Color, moisture: float, temperature: float, p: Vector3, slop
 	var fl := _flo.get_noise_3d(p.x, p.y, p.z) * 0.5 + 0.5
 	var w_flower := (0.07 + 1.6 * smoothstep(0.58, 0.8, fl)) * (1.0 - 0.8 * dry)
 	var fl_kind := int(clampf((_flo2.get_noise_3d(p.x, p.y, p.z) * 0.5 + 0.5) * 3.0, 0.0, 2.999))
-	var total := w_meadow + w_tall + w_dry + w_tuft + w_flower
+	# under the crowns of trees (shade 0..1): the meadow thins, ferns take over, flowers and dry grass hardly grow
+	w_meadow *= 1.0 - 0.7 * shade
+	w_tall *= 1.0 - 0.8 * shade
+	w_dry *= 1.0 - 0.9 * shade
+	w_flower *= 1.0 - 0.7 * shade
+	var w_fern := shade * (1.0 + 2.0 * smoothstep(0.3, 0.7, moisture))
+	var total := w_meadow + w_tall + w_dry + w_tuft + w_flower + w_fern
 	var pick := r * total
 	var key := "meadow"
 	if pick < w_meadow:
@@ -86,12 +92,14 @@ func choose(ground: Color, moisture: float, temperature: float, p: Vector3, slop
 		key = "dry"
 	elif pick < w_meadow + w_tall + w_dry + w_tuft:
 		key = "tuft"
+	elif pick < w_meadow + w_tall + w_dry + w_tuft + w_fern:
+		key = "fern"
 	else:
 		key = ["daisy", "pinkflower", "bluebell"][fl_kind]
 	var t := catalog.get_type(key)
 	# patches: where the meadow noise is low the ground is only lightly covered (clearings), where it is high it is lush
 	var lush := 0.55 + 0.45 * smoothstep(0.25, 0.7, n)
-	return Vector2(float(t.id), clampf(g * steep * lush * t.density, 0.0, 1.0))
+	return Vector2(float(t.id), clampf(g * steep * lush * t.density * (1.0 - 0.35 * shade), 0.0, 1.0))
 
 ## Sea grass: the chance (0..1) it grows at a spot `depth` metres under the surface on a ground of colour `ground`.
 func sea_density(depth: float, ground: Color, p: Vector3, slope: float) -> float:

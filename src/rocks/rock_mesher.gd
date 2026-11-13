@@ -160,6 +160,21 @@ static func _normal_at(r: RockInst, f: Dictionary, world_point: Vector3) -> Vect
 	return (f.x * g.x + f.y * g.y + f.z * g.z).normalized()
 
 static func _add_rock(verts: PackedVector3Array, normals: PackedVector3Array, colors: PackedColorArray, r: RockInst, catalog: RockCatalog, origin: Vector3, exposure: float) -> void:
+	# a bitten rock is drawn from its re-meshed shape (RockCut: evenly sized triangles in the crater). While the worker builds the next one the
+	# CURRENT shape stays (the previous cut, or the rock as it was): a quick stand-in shape would flash a weird form for a few frames.
+	if not r.bites.is_empty() and not r.cut.is_empty():
+		var cv: PackedVector3Array = r.cut.verts
+		var cn: PackedVector3Array = r.cut.normals
+		var cc: PackedColorArray = r.cut.colors
+		var off := r.pos - origin
+		for i in cv.size():
+			verts.append(cv[i] + off)
+			normals.append(cn[i])
+			var col := cc[i]
+			col.a = exposure
+			colors.append(col)
+		return
+	var bl: Array = []                                   # the star shape below never carries bites: a bitten rock without its cut yet is drawn as it was
 	var f := frame_of(r)
 	var pos := r.pos
 	var x: Vector3 = f.x
@@ -172,10 +187,10 @@ static func _add_rock(verts: PackedVector3Array, normals: PackedVector3Array, co
 	var lump := r.lump_amplitude()
 	var uv: PackedVector3Array
 	var ut: PackedInt32Array
-	if not r.bites.is_empty() and r.size >= 0.6:
+	if not bl.is_empty() and r.size >= 0.6:
 		uv = _v3
 		ut = _t3
-	elif r.size >= 1.0 or not r.bites.is_empty():
+	elif r.size >= 1.0:
 		uv = _v2
 		ut = _t2
 	else:
@@ -189,9 +204,9 @@ static func _add_rock(verts: PackedVector3Array, normals: PackedVector3Array, co
 		var u := uv[i]
 		var k := 1.0 if lump <= 0.0 else 1.0 + lump * _lump(u, h)
 		var q0 := Vector3(u.x * sx, u.y * sy, u.z * sz) * k
-		var l0 := q0.length()
 		var q := q0
-		if not r.bites.is_empty() and l0 > 0.0001:
+		var l0 := q0.length()
+		if not bl.is_empty() and l0 > 0.0001:
 			var w := q0 / l0
 			q = w * _bitten(r, l0, w)
 		tv[i] = x * q.x + y * q.y + z * q.z + (pos - origin)
@@ -230,9 +245,9 @@ static func _add_rock(verts: PackedVector3Array, normals: PackedVector3Array, co
 		else:
 			col = c_outer.lerp(c_outer.darkened(0.18), _u(h, 700 + t))       # a little grain between faces
 		# inside a bite the rock is freshly broken: the core shows, or lighter rock where there is none
-		if not r.bites.is_empty():
+		if not bl.is_empty():
 			var cl := Vector3(centre.dot(x), centre.dot(y), centre.dot(z))
-			for bt: Vector4 in r.bites:
+			for bt: Vector4 in bl:
 				if cl.distance_to(Vector3(bt.x, bt.y, bt.z)) < bt.w * 1.15:
 					col = c_core if has_core else c_outer.lightened(0.38)
 					break

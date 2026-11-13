@@ -233,6 +233,8 @@ func _process(delta: float) -> void:
 			var dg := String(_repro.dig).split_floats(",")
 			if dg.size() == 4:
 				world.carve(Vector3(dg[0], dg[1], dg[2]), dg[3])
+		if _repro.has("seq") and _frame >= 340:
+			_seq_step()
 		if _repro.has("digdown") and _frame == 300:
 			# debugging aid (--digdown=N): a shaft N metres deep straight down from the player
 			var upd := player.global_position.normalized()
@@ -499,6 +501,77 @@ func _sweep_report() -> void:
 	for r in block_list.slice(0, 4):
 		print("  BLOCKED  heading %.0f pitch %.0f dist %.0f   solid samples %d/11  arm %.1f" % [r.view.x, r.view.y, r.view.z, r.blocked, r.arm])
 	get_tree().quit()
+
+## Debugging aid (--seq=prefix): farm the biggest rock near the player completely. Every 10 frames one blow with the tool, aimed at the rock
+## (the cursor is placed on it), then a screenshot "<prefix>_<blow>.png" and a line with what is left of the rock. Quits after the rock is gone.
+var _seq_rock: RockInst = null
+var _seq_blow := 0
+var _seq_wait := 0
+func _seq_gone() -> bool:
+	var st = world.rocks.changed.get(_seq_rock.id)
+	return st is bool and st
+func _seq_step() -> void:
+	aim.reach = 50.0
+	if _seq_rock == null:
+		var best: RockInst = null
+		for c: Vector3i in world.chunks:
+			for r: RockInst in (world.chunks[c] as Chunk).rocks:
+				if r.size >= 1.3 and r.pos.distance_to(player.global_position) < 24.0 and not r.deposit:
+					if best == null or r.size > best.size:
+						best = r
+		if best == null:
+			print("SEQ no big rock near the player")
+			get_tree().quit()
+			return
+		_seq_rock = best
+		# a clean study view: no grass or trees in front, no panel, the camera close to the rock from the side
+		for c2: Vector3i in world.chunks:
+			var ch2: Chunk = world.chunks[c2]
+			for k in ch2.grass_nodes:
+				(ch2.grass_nodes[k] as Node3D).visible = false
+			if ch2.tree_instance != null:
+				ch2.tree_instance.visible = false
+			if ch2.tree_far != null:
+				ch2.tree_far.visible = false
+		far_trees.visible = false
+		hud.visible = false
+		var upq := best.pos.normalized()
+		var sidev := upq.cross(Vector3.UP).normalized()
+		player.global_position = best.pos + sidev * (best.size * 2.2 + 2.2) + upq * 0.5
+		player.freeze = true
+		cam.pitch = 0.18
+		cam.distance = 5.0
+		var to_rock := (best.pos - player.global_position)
+		to_rock -= upq * to_rock.dot(upq)
+		cam.fwd = to_rock.normalized()
+		print("SEQ rock size %.2f m, layers %s, %d blows needed" % [best.size, best.layers, int(ceilf(world.rocks.layer_hardness(best)))])
+		return
+	_seq_wait += 1
+	var sp := cam.unproject_position(_seq_rock.pos)
+	_vcur = sp
+	if _seq_wait == 3:
+		aim.pick(cam, world, player.global_position, _vcur)
+		if aim.target.kind != "rock":
+			print("SEQ the cursor is not on the rock (target %s)" % aim.target.kind)
+		_use_tool(false)
+		_seq_blow += 1
+	elif _seq_wait == 5:
+		if _seq_blow in [2, 6, 12, 18, 24]:
+			get_viewport().get_texture().get_image().save_png("%s_%02d_just.png" % [String(_repro.seq), _seq_blow])      # right after the click, the new shape not ready yet
+	elif _seq_wait == 40:
+		var left := 0.0 if _seq_gone() else RockMesher.volume_fraction(_seq_rock)
+		var tris := 0
+		for c: Vector3i in world.chunks:
+			var ch: Chunk = world.chunks[c]
+			if ch.rock_instance != null and ch.rocks.has(_seq_rock):
+				tris = (ch.rock_instance.mesh as ArrayMesh).surface_get_arrays(0)[Mesh.ARRAY_VERTEX].size() / 3
+		print("SEQ blow %2d  rock left %3.0f%%  bites %d  size %.2f  chunk rock mesh %d triangles" % [_seq_blow, left * 100.0, _seq_rock.bites.size(), _seq_rock.size, tris])
+		get_viewport().get_texture().get_image().save_png("%s_%02d.png" % [String(_repro.seq), _seq_blow])
+	elif _seq_wait >= 42:
+		_seq_wait = 0
+		if _seq_gone() or _seq_blow > 80:
+			print("SEQ done after %d blows" % _seq_blow)
+			get_tree().quit()
 
 ## Debugging aid (--hit=N): N blows with the tool at the current aim, as if the player held the button.
 func _debug_hit(n: int) -> void:

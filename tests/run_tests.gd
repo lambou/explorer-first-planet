@@ -1248,7 +1248,7 @@ func _grass_tests() -> void:
 	print("== grass ==")
 	var g := PlanetGenerator.new(1337)
 	var cat := GrassCatalog.new(1337)
-	check(cat.types.size() == 8 and cat.get_type("meadow") != null and cat.get_type("seagrass").underwater, "the catalog has meadow, tall, tuft, dry and sea grass")
+	check(cat.types.size() == 9 and cat.get_type("meadow") != null and cat.get_type("seagrass").underwater, "the catalog has meadow, tall, tuft, dry and sea grass")
 	var cat2 := GrassCatalog.new(1337)
 	var cat3 := GrassCatalog.new(99)
 	check(cat.get_type("meadow").tip_color == cat2.get_type("meadow").tip_color, "the same seed gives the same palette")
@@ -1278,6 +1278,25 @@ func _grass_tests() -> void:
 			seen[cat.by_id(int(pick.x)).key] = true
 	print("  kinds that grow on green ground over many places: ", seen.keys())
 	check(seen.size() >= 3, "several kinds of grass grow depending on the place and the climate")
+	# shade: under a crown the meadow gives way to ferns
+	var open_ferns := 0
+	var shade_ferns := 0
+	var shade_meadow := 0
+	var open_meadow := 0
+	for i in 300:
+		var pp := PlanetGenerator.fibonacci_dir(i, 300) * 5200.0
+		var po := field.choose(GrassField.GRASS_GREEN, 0.6, 0.5, pp, 0.1, float(i % 17) / 17.0, 0.0)
+		var ps := field.choose(GrassField.GRASS_GREEN, 0.6, 0.5, pp, 0.1, float(i % 17) / 17.0, 1.0)
+		if po.x >= 0.0:
+			var ko := cat.by_id(int(po.x)).key
+			open_ferns += int(ko == "fern")
+			open_meadow += int(ko == "meadow")
+		if ps.x >= 0.0:
+			var ks := cat.by_id(int(ps.x)).key
+			shade_ferns += int(ks == "fern")
+			shade_meadow += int(ks == "meadow")
+	print("  in the open: %d ferns, %d meadow; in a crown's shade: %d ferns, %d meadow" % [open_ferns, open_meadow, shade_ferns, shade_meadow])
+	check(open_ferns == 0 and shade_ferns > shade_meadow and shade_meadow < open_meadow, "under a crown the meadow thins and ferns take over")
 	var sand := Color(0.8, 0.7, 0.5)
 	check(field.sea_density(0.2, sand, Vector3(5100, 0, 0), 0.1) == 0.0 and field.sea_density(60.0, sand, Vector3(5100, 0, 0), 0.1) == 0.0, "sea grass needs water 0.6 to 24 m deep")
 	var sp := g.find_spawn()
@@ -1600,6 +1619,12 @@ func _tree_tests() -> void:
 	# the camera fade is in the shader, the trees share the grass wind and light
 	check(TreeMaterial.CODE.contains("dither(") and TreeMaterial.CODE.contains("tree_cam") and TreeMaterial.CODE.contains("grass_wind"), "trees fade out in a dither when they block the camera, and sway with the shared wind")
 
+func _fresh_rock(r: RockInst, cat: RockCatalog) -> RockInst:
+	var c := RockInst.from_state(r.to_state())
+	c.bites = []
+	c.cut = {}
+	return c
+
 func _rock_break_tests() -> void:
 	print("== rocks: breaking and harvesting ==")
 	var g := PlanetGenerator.new(1337)
@@ -1661,7 +1686,10 @@ func _rock_break_tests() -> void:
 	var sh1 := RockMesher.surface_hit(dr, dr.pos + side * 6.0, -side, 20.0)
 	check(sh1.hit and sh1.t > sh0.t + 0.05, "the next blow lands on the new, deeper surface")
 	check(rs.changed.has(888) and (rs.changed[888].bites as Array).size() == 1, "the bites are stored with the rock")
-	check((RockMesher.bake([dr], cat, Vector3.ZERO).verts as PackedVector3Array).size() == 1280 * 3, "a bitten rock is baked finely enough to show the bite (1280 triangles)")
+	dr.cut = RockCut.build(dr, cat)
+	dr.cut_sig = dr.bites.hash()
+	var dr_tris := (RockMesher.bake([dr], cat, Vector3.ZERO).verts as PackedVector3Array).size() / 3
+	check(dr_tris > 300 and dr_tris != 1280, "a bitten rock is drawn from its re-meshed shape, fine enough to show the bite (%d triangles)" % dr_tris)
 	# coherence over a whole rock: it is eaten away blow by blow and the last blow removes what is left
 	var wr := RockInst.new()
 	wr.id = 999
@@ -1694,6 +1722,7 @@ func _rock_break_tests() -> void:
 			eaten = false
 	check(eaten and vols[vols.size() - 1] < 0.45, "the rock is eaten away blow by blow and little is left for the last blow")
 	check(vols[0] > 0.8, "one blow only takes a bite: the rock is still almost whole")
+	check(vols[vols.size() - 1] > 0.12, "the last piece is chunky (over 12% of the rock), never a tiny stump")
 	# a layered rock: the shell is eaten, falls away on its last blow and leaves the core (smaller, no bites)
 	var lw := RockInst.new()
 	lw.size = 2.0
@@ -1710,6 +1739,66 @@ func _rock_break_tests() -> void:
 			shed_at = i + 1
 			break
 	check(shed_at == lneed and absf(lw.size - 1.0) < 0.01 and lw.bites.is_empty(), "the shell goes on its last blow and the core is left")
+	# farming a rock from the first blow to the last: the re-meshed shape stays consistent all along
+	var fr_rock := RockInst.new()
+	fr_rock.id = 4321
+	fr_rock.size = 2.76
+	fr_rock.shape = 99
+	fr_rock.pos = Vector3(0, 100, 0)
+	fr_rock.normal = Vector3.UP
+	fr_rock.layers = [[cat.get_type("limestone").id, 1.0]]
+	var fr_list: Array = [fr_rock]
+	var fr_need := int(ceilf(rs.layer_hardness(fr_rock)))
+	var tri_counts: Array[int] = []
+	var sliver_share := 0.0
+	var winding_all := true
+	var inside_all := true
+	var fr_dirs := [Vector3(1, 0.3, 0.2), Vector3(0.2, 1, 0.3), Vector3(-0.6, 0.2, 0.8)]
+	var fr_f := RockMesher.frame_of(fr_rock)
+	for i in fr_need:
+		var dir: Vector3 = (fr_dirs[(i / 4) % 3] as Vector3).normalized()
+		var sh := RockMesher.surface_hit(fr_rock, fr_rock.pos + dir * 12.0, -dir, 40.0)
+		if not sh.hit:
+			continue
+		var res := rs.hit(fr_rock, fr_list, 1.0, sh.point)
+		if res.event != "hit":
+			break
+		if i % 6 == 5:
+			var cutm := RockCut.build(fr_rock, rs.catalog)
+			var cv: PackedVector3Array = cutm.verts
+			var cn: PackedVector3Array = cutm.normals
+			var nt := cv.size() / 3
+			tri_counts.append(nt)
+			var bad := 0
+			for t in nt:
+				var a0 := cv[t * 3]
+				var b0 := cv[t * 3 + 1]
+				var c0 := cv[t * 3 + 2]
+				var cr := (b0 - a0).cross(c0 - a0)
+				var longest := maxf((b0 - a0).length(), maxf((c0 - b0).length(), (a0 - c0).length()))
+				if longest * longest / maxf(cr.length(), 1e-6) > 12.0:
+					bad += 1
+				if cr.dot(cn[t * 3]) > 0.0:
+					winding_all = false
+				if a0.length() > fr_rock.size * 1.5:
+					inside_all = false
+			sliver_share = maxf(sliver_share, float(bad) / maxf(nt, 1))
+	print("  farming a 2.76 m rock: triangles after blows 6, 12, 18, 24: %s, worst sliver share %.1f%%" % [tri_counts, sliver_share * 100.0])
+	check(tri_counts.size() >= 3 and tri_counts[tri_counts.size() - 1] < tri_counts[0] * 0.6, "the cut rock needs fewer and fewer triangles as it is eaten away")
+	check(sliver_share < 0.04, "the re-meshed rock has evenly sized triangles (under 4% slivers) from the first blow to the last")
+	check(winding_all and inside_all, "its triangles face outward and stay inside the original rock")
+	# while the re-meshed shape is being built the CURRENT shape stays: no stand-in shape flashes on screen
+	var intact_tris := (RockMesher.bake([_fresh_rock(fr_rock, cat)], cat, Vector3.ZERO).verts as PackedVector3Array).size()
+	fr_rock.cut = {}
+	var pending := RockMesher.bake([fr_rock], cat, Vector3.ZERO)
+	check((pending.verts as PackedVector3Array).size() == intact_tris, "a bitten rock waiting for its new shape is drawn as it was (no flash of a weird stand-in shape)")
+	fr_rock.cut = RockCut.build(fr_rock, cat)
+	fr_rock.cut_sig = fr_rock.bites.hash()
+	var good := RockMesher.bake([fr_rock], cat, Vector3.ZERO)
+	check((good.verts as PackedVector3Array).size() == (fr_rock.cut.verts as PackedVector3Array).size(), "and once it is ready the re-meshed shape is shown")
+	fr_rock.bites.append(Vector4(0, 0, 0, 0.1))
+	var stale := RockMesher.bake([fr_rock], cat, Vector3.ZERO)
+	check((stale.verts as PackedVector3Array).size() == (fr_rock.cut.verts as PackedVector3Array).size(), "after another blow the previous shape stays until the next one is ready")
 	# reach: the arm is short
 	check(ToolAim.REACH <= 5.0, "the tool only reaches about an arm's length from the ball")
 	# harder and bigger rocks take more hits
