@@ -1,8 +1,8 @@
 class_name AimOverlay
 extends Control
-## Marks what the tool would work on: a small ring and dot at the cursor while it points at something (the ground, a rock, a tree):
-## white / yellow within reach, RED out of reach (the tool does nothing there). It is secondary: it never takes part in moving the
-## camera, and shows nothing when the cursor points at nothing. Display only.
+## The RETICLE: a small ring and dot at the aim, ALWAYS there while the game is played (shooting and throwing will aim with it): white on the
+## ground or at nothing, yellow on a rock or tree in reach, RED out of reach (the tool does nothing there). It is drawn from the screen position
+## alone and cannot be delayed by any world query. It never takes part in moving the camera. Display only.
 
 var cursor := Vector2.ZERO
 var state := 0                       # 0 nothing under the cursor, 1 ground in reach, 2 out of reach, 3 a rock or tree in reach
@@ -19,8 +19,8 @@ func update_state(p_cursor: Vector2, p_state: int, p_shown: bool) -> void:
 	queue_redraw()
 
 func _draw() -> void:
-	if not shown or state == 0:
-		return                                       # the cursor points at nothing: only the system cursor
+	if not shown:
+		return                                       # only while the game holds the mouse; never because of what is (or is not) under it
 	var col := Color(1, 1, 1, 0.95)
 	if state == 2:
 		col = Color(1.0, 0.3, 0.25, 0.95)            # out of reach

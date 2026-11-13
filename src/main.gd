@@ -984,7 +984,7 @@ func _camtest_step() -> void:
 	var cres := world.raycast(cam.global_position, -cam.global_transform.basis.z, 60.0)
 	if cres.hit and _ct_t % 20 == 0:
 		print("CT marker (screen centre) lands %.2f m from the ball" % player.global_position.distance_to(cres.point))
-	print(line + "   [" + cam.dbg + "]")
+	print(line + "   [" + cam.dbg + "]  pick %.2f ms (worst %.2f)  patch slice %.2f ms (worst %.2f)" % [aim.pick_us / 1000.0, aim.worst_pick_us / 1000.0, aim.job_us / 1000.0, aim.worst_job_us / 1000.0])
 	if _ct_t % 4 == 0:
 		get_viewport().get_texture().get_image().save_png("%s_%d_%03d.png" % [prefix, _ct_phase, _ct_t])
 	if _repro.has("walk") and _ct_phase == 2 and _ct_t > 40 * int(_repro.get("blows", 3)) + 40:

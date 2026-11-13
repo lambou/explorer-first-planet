@@ -5,10 +5,15 @@ extends Node3D
 ## area with a bright outline, every point of it dropped onto the real surface (the terrain for the ground, the rock's
 ## own bitten surface for a rock), so it covers the targeted shape and never sinks into the floor or floats over it.
 ## White inside the player's reach, red outside it (the tool does nothing there). Display + picking only.
+## SECONDARY by design: it never takes part in moving the player or the camera, and it never makes a frame longer. Finding the target runs every
+## PICK_EVERY frames; the marker patch is built in slices of at most BUDGET_US microseconds a frame (the old patch stays on screen, moved to the new
+## target, until the new one is ready). The reticle on the screen does not depend on any of it (AimOverlay).
 
 const REACH := 4.5                 # metres from the ball: the arm's length; nothing farther can be altered
 const GROUND_RADIUS := 2.4         # what one dig removes (same as VoxelWorld.carve in main)
 const MAX_RAY := 70.0
+const PICK_EVERY := 3               # the target is looked for every this many frames (the reticle and the tool use the last answer)
+const BUDGET_US := 900             # the marker patch is built at most this long per frame
 const SEGS := 28                   # points around the patch
 const SEGS_ROCK := 18              # a rock needs a surface search per point: fewer points
 const RINGS := [0.5, 0.9, 1.0]     # radii of the point rings (fractions of the patch radius): fill, outline inner edge, outline outer edge
@@ -72,7 +77,23 @@ static func _material(alpha: float) -> ShaderMaterial:
 
 ## What is under the mouse. `mouse` in viewport pixels. Returns
 ## {kind: "rock" | "ground" | "none", point, normal, in_reach, radius, rock?, chunk?, t}.
-func pick(cam: Camera3D, world: VoxelWorld, player_pos: Vector3, mouse: Vector2) -> Dictionary:
+var _frames := PICK_EVERY            # frames since the last pick
+var _world: VoxelWorld
+var _job := {}                     # the patch being built: {t, rings, k, i, segs, ...}; empty = none
+var job_us := 0                    # work done on the patch in the last frame (microseconds) and the worst frame
+var worst_job_us := 0
+var pick_us := 0                  # cost of the last pick (ray searches) and of the last patch build, microseconds: shown in the debug panel
+var patch_us := 0
+var worst_pick_us := 0
+var worst_patch_us := 0
+
+func pick(cam: Camera3D, world: VoxelWorld, player_pos: Vector3, mouse: Vector2, force: bool = false) -> Dictionary:
+	_frames += 1
+	if _frames < PICK_EVERY and not force:
+		return target                                      # the last answer: a target does not change in a frame or two
+	_frames = 0
+	_world = world
+	var t0 := Time.get_ticks_usec()
 	var origin := cam.project_ray_origin(mouse)
 	var dir := cam.project_ray_normal(mouse)
 	var ground := world.raycast(origin, dir, MAX_RAY)
@@ -103,16 +124,20 @@ func pick(cam: Camera3D, world: VoxelWorld, player_pos: Vector3, mouse: Vector2)
 		t = {"kind": "ground", "point": p, "normal": n, "t": gt, "radius": GROUND_RADIUS * 0.9,
 			"in_reach": player_pos.distance_to(p) <= reach}
 	target = t
+	pick_us = Time.get_ticks_usec() - t0
+	worst_pick_us = maxi(worst_pick_us, pick_us)
 	_show(world, t)
 	return t
 
 ## The tool points at nothing (the mouse is outside the action perimeter).
 func clear() -> void:
 	target = {"kind": "none"}
+	_job = {}
 	visible = false
 
 func _show(world: VoxelWorld, t: Dictionary) -> void:
 	if t.kind == "none":
+		_job = {}
 		visible = false
 		return                                           # (out of reach the patch stays, in red: the tool cannot work there)
 	visible = true
@@ -129,29 +154,54 @@ func _show(world: VoxelWorld, t: Dictionary) -> void:
 	var key := "%s|%d|%.2f,%.2f,%.2f|%.2f" % [t.kind, world.edit_rev, pt.x, pt.y, pt.z, t.rock.hits if t.kind == "rock" else 0.0]
 	if key != _key:
 		_key = key
-		_build_patch(world, t)
+		_start_patch(t)
 
-## Build the patch: rings of points around the target, each dropped onto the surface, then triangles between them.
-func _build_patch(world: VoxelWorld, t: Dictionary) -> void:
+## Start building the patch for target `t`: rings of points around it, each dropped onto the surface (that is the slow part), then triangles between them.
+## The work happens in _process, a slice per frame.
+func _start_patch(t: Dictionary) -> void:
 	var n: Vector3 = t.normal
-	var centre: Vector3 = t.point
 	var ref := Vector3.RIGHT if absf(n.x) < 0.9 else Vector3.FORWARD
 	var tx := n.cross(ref).normalized()
-	var tz := tx.cross(n)
-	var rad: float = t.radius
 	var is_rock: bool = t.kind == "rock"
-	var is_tree: bool = t.kind == "tree"
-	var rock: RockInst = t.rock if is_rock else null
-	var frame := RockMesher.frame_of(rock) if is_rock else {}
-	var rings: Array = []                       # per ring: PackedVector3Array (local to the target; INF = no surface there)
-	var segs := SEGS_ROCK if is_rock else SEGS
-	for k in RINGS.size():
-		var ring := PackedVector3Array()
-		for i in segs:
-			var a := TAU * i / segs
-			var p0 := centre + (tx * cos(a) + tz * sin(a)) * rad * float(RINGS[k])
-			ring.append(_on_cylinder(p0, t, centre) if is_tree else _on_surface(world, p0, n, rock, frame, centre))
-		rings.append(ring)
+	_job = {"t": t, "n": n, "tx": tx, "tz": tx.cross(n), "rad": t.radius, "rock": is_rock, "tree": t.kind == "tree",
+		"frame": RockMesher.frame_of(t.rock) if is_rock else {}, "segs": SEGS_ROCK if is_rock else SEGS, "k": 0, "i": 0,
+		"rings": [PackedVector3Array()]}
+
+func _process(_delta: float) -> void:
+	if _job.is_empty() or _world == null:
+		job_us = 0
+		return
+	var t0 := Time.get_ticks_usec()
+	var t: Dictionary = _job.t
+	var centre: Vector3 = t.point
+	var rock: RockInst = t.rock if _job.rock else null
+	var segs: int = _job.segs
+	while Time.get_ticks_usec() - t0 < BUDGET_US:
+		var k: int = _job.k
+		var i: int = _job.i
+		var a := TAU * i / segs
+		var p0 := centre + ((_job.tx as Vector3) * cos(a) + (_job.tz as Vector3) * sin(a)) * float(_job.rad) * float(RINGS[k])
+		var q: Vector3 = _on_cylinder(p0, t, centre) if _job.tree else _on_surface(_world, p0, _job.n, rock, _job.frame, centre)
+		var ring: PackedVector3Array = _job.rings[k]
+		ring.append(q)
+		_job.rings[k] = ring                                   # (a packed array taken out of an Array is a copy: put it back)
+		i += 1
+		if i >= segs:
+			i = 0
+			k += 1
+			if k >= RINGS.size():
+				_assemble(_job.rings as Array, segs)
+				_job = {}
+				break
+			(_job.rings as Array).append(PackedVector3Array())
+		_job.k = k
+		_job.i = i
+	job_us = Time.get_ticks_usec() - t0
+	worst_job_us = maxi(worst_job_us, job_us)
+
+## The patch is complete: its triangles replace the old patch's.
+func _assemble(rings: Array, segs: int) -> void:
+	var n: Vector3 = _job.n
 	_imm.clear_surfaces()
 	# translucent area: a fan from the centre to the first ring, then the band to the second
 	var fill := PackedVector3Array()
