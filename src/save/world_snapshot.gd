@@ -21,7 +21,7 @@ func capture(world: VoxelWorld, player: BallPlayer, kit: PlayerKit, torches: Pla
 		"rocks_changed": world.rocks.changed.duplicate(true),
 		"rocks_moved": world.rocks.moved_index.duplicate(true),
 		"trees_changed": world.trees.changed.duplicate(true),
-		"player": {"pos": player.position, "spawn": player.spawn_pos},     # (a direct child of the world root: local = global)
+		"player": {"pos": player.position, "spawn": player.spawn_pos, "fly": player.fly, "fly_pitch": player.fly_pitch},   # (a direct child of the world root: local = global)
 		"items": ItemCatalog.dynamic_data(),
 		"inventory": kit.inventory.to_data(),
 		"belt": kit.belt.to_data(),
@@ -42,6 +42,9 @@ static func restore_player(data: Dictionary, player: BallPlayer, kit: PlayerKit,
 	ItemCatalog.restore_dynamic(data.items)               # the rocks and woods he carries must exist before the inventory refers to them
 	player.position = data.player.pos
 	player.spawn_pos = data.player.spawn
+	player.fly = bool(data.player.get("fly", false))                 # saved while flying: he is flying again, not falling
+	player.fly_pitch = float(data.player.get("fly_pitch", 0.0))
+	player.linear_velocity = Vector3.ZERO
 	kit.inventory.from_data(data.inventory)
 	kit.belt.from_data(data.belt)
 	kit.bar_slot = data.bar_slot

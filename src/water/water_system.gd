@@ -18,6 +18,9 @@ const APPLY_PER_FRAME := 2         # water meshes swapped in per frame
 var gen: PlanetGenerator
 var state: WaterState
 var material: ShaderMaterial       # surface of the water in built chunks
+var ripples := WaterRipples.new()      # rings made by swimmers and splashes
+var wind := 0.6                    # the wind's direction (radians), drifts slowly; all the wave directions turn with it
+var swell_time := 0.0              # the clock of the swell (shared with the shader)
 var agitation := 0.3               # current state at the player's place, 0 calm .. 1 storm
 ## Flooding of caves and dug holes by the solver (only space at or below the water level gets water).
 var cave_flooding := true
@@ -54,6 +57,24 @@ func update_state(player_pos: Vector3, time_s: float) -> void:
 	agitation = lerpf(agitation, target, 0.02 if forced_agitation < 0.0 else 0.3)
 	for m in _materials:
 		m.set_shader_parameter("agitation", agitation)
+	swell_time = fposmod(Time.get_ticks_msec() / 1000.0, 10000.0)
+	wind = 0.6 + 0.5 * sin(time_s * 0.011) + 0.3 * sin(time_s * 0.0037)
+	for m in _materials:
+		m.set_shader_parameter("swell_time", swell_time)
+		m.set_shader_parameter("wind", wind)
+	ripples.upload(_materials, Time.get_ticks_msec() / 1000.0)
+
+## The sun for the underwater look of the surface (Snell's window and the glare seen from below): `sun_dir` = the way the sunlight travels,
+## `daylight` 0..1, `up` = the planet's radial direction at the camera.
+func set_sun(sun_dir: Vector3, daylight: float, up: Vector3) -> void:
+	var ray_up := -UnderwaterRays.refract_sun(sun_dir, up)           # where the sun appears to be, seen from under the water
+	for m in _materials:
+		m.set_shader_parameter("sky_light", daylight)
+		m.set_shader_parameter("ray_up", ray_up)
+
+## A disturbance of the surface at `p` (world position): a ring spreads from it. strength about 0.2 (a bob) .. 1 (a splash) .. 2.5 (a hard fall).
+func add_ripple(p: Vector3, strength: float) -> void:
+	ripples.add(p, strength, Time.get_ticks_msec() / 1000.0)
 
 func state_name() -> String:
 	return WaterState.name_of(agitation)
@@ -169,4 +190,6 @@ func submersion(chunks: Dictionary, p: Vector3) -> float:
 	var w := water_level_at(chunks, p)
 	if w == PlanetGenerator.NO_WATER:
 		return -1.0e9
+	if w == 0.0:                                         # the sea heaves with the swell that is drawn (rivers and cave water do not)
+		w += WaterMaterial.swell_height(p, swell_time, agitation, wind)
 	return w - (p.length() - WorldConfig.PLANET_RADIUS)

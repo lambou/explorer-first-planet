@@ -31,7 +31,14 @@ const FOLLOW := 0.8             # how much of the slope ahead the camera's pitch
 const DROP_MAX := 0.5           # (radians) facing a hill the camera drops by at most this much ...
 const RISE_MAX := 0.3           # ... and facing downhill it rises by at most this much
 
-var _slope := 0.0               # the slope of the ground ahead (radians, uphill positive), smoothed
+var _target_speed := 0.0
+var _surf_w := 0.0              # 0 .. 1: he floats at the surface (smoothed): the camera comes lower, stays above the water
+var _dive_w := 0.0              # 0 .. 1: he dives / is deep (smoothed): the camera follows the swim pitch and goes under the water with him
+var _swim_cam := 0.0            # the swim pitch the camera follows (smoothed)
+var _line_off := 0.0            # how far the camera is moved (along up) to keep clear of the water line (smoothed)
+var _fly_w := 0.0               # 0 on the ground .. 1 flying (smoothed)
+var _fly_cam := 0.0            # the flight pitch the camera follows (smoothed)
+var _slope := 0.0              # the slope of the ground ahead (radians, uphill positive), smoothed
 var _slope_goal := 0.0
 var _slope_cd := 0.0
 var dbg := ""                  # the numbers of the last frame (debugging aid: main.gd --camtest prints them)
@@ -74,7 +81,7 @@ func _process(delta: float) -> void:
 		return
 	# in a cave or shaft the camera only ever sits at a spot that fits in the room
 	var dist := minf(distance, UNDERGROUND_MAX) if (world != null and world.underground) else distance
-	var tp := target.global_position
+	var tp := (target as BallPlayer).render_pos() if target is BallPlayer else target.global_position
 	var up := tp.normalized()
 	fwd = fwd - up * fwd.dot(up)
 	if fwd.length() < 0.001:
@@ -84,8 +91,26 @@ func _process(delta: float) -> void:
 	var cave := world != null and world.underground
 	_update_slope(tp, up, delta, cave)
 	var base_pitch := clampf(pitch - clampf(_slope * FOLLOW, -RISE_MAX, DROP_MAX), -0.2, MAX_PITCH)     # the pitch the player chose, tilted with the ground ahead
-	var eye := tp + up * PIVOT_HEIGHT                       # the middle of the character's body: the arm always starts HERE, in the open air
-	var focus_goal := eye + fwd * _clear_lead(eye, delta, cave)       # where the camera would look if it were rigid: a little ahead of the ball
+	if target is BallPlayer:
+		# flying: the camera drops behind a climb and rises over a dive (the mouse steers the flight, not the camera's height)
+		var flying: bool = (target as BallPlayer).fly
+		_fly_cam = lerpf(_fly_cam, (target as BallPlayer).fly_pitch if flying else 0.0, 1.0 - exp(-delta * 4.0))
+		_target_speed = (target as BallPlayer).linear_velocity.length()
+		_fly_w = lerpf(_fly_w, 1.0 if flying else 0.0, 1.0 - exp(-delta * 4.0))
+		base_pitch = lerpf(base_pitch, clampf(0.35 - _fly_cam * 0.9, -0.2, MAX_PITCH), _fly_w)
+		# swimming: at the surface the camera comes lower (but stays above the water, the waterline reads); diving it follows the swim pitch like the
+		# flight camera and goes under with him; deep it stays under with him
+		var bp := target as BallPlayer
+		var diving := bp.swim_state == BallPlayer.SwimState.DIVE or bp.swim_state == BallPlayer.SwimState.DEEP
+		_surf_w = lerpf(_surf_w, 1.0 if bp.swim_state == BallPlayer.SwimState.SURFACE else 0.0, 1.0 - exp(-delta * 3.0))
+		_dive_w = lerpf(_dive_w, 1.0 if diving else 0.0, 1.0 - exp(-delta * 2.5))
+		_swim_cam = lerpf(_swim_cam, bp.swim_pitch if diving else 0.0, 1.0 - exp(-delta * 4.0))
+		base_pitch = lerpf(base_pitch, clampf(0.35 - _swim_cam * 0.9, -0.2, MAX_PITCH), _dive_w)
+		base_pitch = maxf(base_pitch - 0.1 * _surf_w, -0.2)
+	var eye := tp + up * PIVOT_HEIGHT                      # the middle of the character's body: the arm always starts HERE, in the open air
+	var focus_goal := eye + fwd * _clear_lead(eye, delta, cave) * (1.0 - 0.85 * maxf(_surf_w, _dive_w))       # (swimming: he is centred, no lead) where the camera would look if it were rigid: a little ahead of the ball
+	if target is BallPlayer and _dive_w > 0.001:
+		focus_goal += ((target as BallPlayer).linear_velocity * 0.12).limit_length(1.0) * _dive_w     # swimming: it looks a little ahead of where he goes (predictive follow)
 	# The camera does not sit rigidly on the player: it orbits a FOCUS point that follows him loosely. Inside FOCUS_DEAD of the goal the focus stays put
 	# (he can walk and jump about the screen, the picture does not bob); outside it, it is dragged along with a lag. The mouse still turns the view freely.
 	if not _focus_ready or cave or _focus.distance_to(focus_goal) > FOCUS_SNAP:
@@ -93,9 +118,10 @@ func _process(delta: float) -> void:
 		_focus_ready = true
 	else:
 		var off := _focus - focus_goal
-		if off.length() > FOCUS_DEAD:
-			off = off.normalized() * FOCUS_DEAD
-		_focus = _focus.lerp(focus_goal + off, 1.0 - exp(-delta * FOCUS_RATE))
+		var dead := lerpf(FOCUS_DEAD, 0.3, maxf(_surf_w, _dive_w))        # swimming: he stays centred (no dead zone to drift in)
+		if off.length() > dead:
+			off = off.normalized() * dead
+		_focus = _focus.lerp(focus_goal + off, 1.0 - exp(-delta * (FOCUS_RATE + _fly_w * (4.0 + 0.5 * _target_speed) + _dive_w * (3.0 + 0.4 * _target_speed))))     # flying: it keeps up, whatever his speed
 	var pivot := _focus                                       # what the camera orbits and looks at
 	var exclude: Array[RID] = []
 	if target is CollisionObject3D:
@@ -106,7 +132,9 @@ func _process(delta: float) -> void:
 	view_fwd = fwd
 	# The camera spot is behind the ball, as far as the player chose; the way there is measured from the BODY. If something is in the way the arm
 	# shortens towards the ball (it never collapses onto the point ahead of him), at once when blocked and growing back smoothly.
-	var spot := pivot + back * dist + up * CAMERA_LIFT     # a little above where the plain arm would put it
+	var lift := lerpf(lerpf(CAMERA_LIFT, 1.4, _surf_w), 0.6, _dive_w)         # swimming: lower at the surface, lower still when diving
+	var swim_dist := dist * lerpf(1.0, 0.9, _surf_w)
+	var spot := pivot + back * swim_dist + up * lift     # a little above where the plain arm would put it
 	var to_spot := spot - eye
 	var arm_len := to_spot.length()
 	var arm_dir := to_spot / maxf(arm_len, 0.001)
@@ -128,6 +156,27 @@ func _process(delta: float) -> void:
 			reach *= 0.86
 			pos = eye + arm_dir * reach
 			tries += 1
+	# He is under water (head clearly below the surface): the camera must be under water too, never above it looking down through the surface. The arm
+	# is shortened (at once, every frame) until the camera is under; it grows back by itself the next frames once it can.
+	if world != null and target is BallPlayer and (target as BallPlayer).water_depth > 1.3:
+		var cuts := 0
+		while cuts < 14 and reach > 0.4 and world.submersion(pos) < 0.15:
+			reach *= 0.8
+			pos = eye + arm_dir * reach
+			cuts += 1
+	# the water line: the opaque surface must never lie between the camera and the swimmer. Deeper than 1.4 m he is seen from under the water (the
+	# camera at least 0.5 m below the surface), at the surface or above it the camera stays at least 0.3 m above it. Smoothed, so it never jumps.
+	var want_off := 0.0
+	if world != null and target is BallPlayer:
+		var cs: float = world.submersion(pos)
+		var pd: float = (target as BallPlayer).water_depth
+		if cs > -1.0e8 and pd > -1.0e8:
+			if pd > 1.4 and cs < 0.5 and cs > -2.0:                  # (only within 2 m of the line: far above it the camera follows him down by itself)
+				want_off = -(0.5 - cs)
+			elif pd < 0.3 and cs > -0.3 and cs < 2.0:
+				want_off = cs + 0.3
+	_line_off = lerpf(_line_off, want_off, 1.0 - exp(-delta * 10.0))
+	pos += up * _line_off
 	if reach < 0.3:
 		# ball pressed against a wall: look along the ball's heading from right next to it
 		global_transform = Transform3D(Basis.looking_at(view_fwd, up), pos)

@@ -47,6 +47,7 @@ var _hud_timer := 0.0
 var _hole := 0.0
 var _was_dark := false
 var _dark := 0.0       # 0 = the outside world is there, 1 = enclosed underground
+var rays: UnderwaterRays       # the sunbeams under the water
 var _under := false       # the camera is under water (with hysteresis, see _process)
 var _far_hidden := false
 var _col := Column.new()
@@ -197,6 +198,8 @@ func _ready() -> void:
 	kit.belt.changed.connect(autosave.request)
 	tree_fall.landed.connect(func(_t: TreeInst, _p: Vector3, _c: Array) -> void: autosave.request())
 	autosave.enabled = playing and (_repro.is_empty() or _repro.has("save"))       # the debugging runs never save (unless --save=1)
+	rays = UnderwaterRays.new()
+	add_child(rays)
 	_apply_repro()
 
 ## Launch options that load the exact view from a captured HUD panel (the panel prints the same numbers):
@@ -227,6 +230,13 @@ func _apply_repro() -> void:
 			player.position = Vector3(v[0], v[1], v[2])
 			player.spawn_pos = player.position
 	cam.locked = _repro.has("pos")
+	if _repro.has("fly"):                                # --fly=1 (--flykz=1: W held, --flyboost=1: Shift held, --flypitch=DEG)
+		player.fly = true
+		player.dbg_kz = float(_repro.get("flykz", 0.0))
+		player.dbg_boost = _repro.has("flyboost")
+		player.fly_pitch = deg_to_rad(float(_repro.get("flypitch", 0.0)))
+	if _repro.has("oceantest"):                          # --oceantest=DIR: a scripted run over the sea (src/debug/ocean_test.gd)
+		add_child(OceanTest.new(self, String(_repro.oceantest)))
 	if _repro.has("wind"):
 		world.grass.forced_wind = float(_repro.wind)
 	if _repro.has("reach"):
@@ -357,6 +367,8 @@ func _process(delta: float) -> void:
 	# the character faces where the camera faces, and his head follows how far the camera looks up or down
 	character.aim_dir = cam.view_fwd
 	var cup := player.global_position.normalized()
+	if _repro.has("faceangle"):                          # debugging aid (--faceangle=DEG): he faces that many degrees off the camera's direction (side views)
+		character.aim_dir = cam.view_fwd.rotated(cup, deg_to_rad(float(_repro.faceangle)))
 	character.look_pitch = asin(clampf((-cam.global_transform.basis.z).dot(cup), -1.0, 1.0))
 	if aiming:
 		aim.pick(cam, world, player.global_position, _vcur)
@@ -543,6 +555,8 @@ func _process(delta: float) -> void:
 	env.fog_sky_affect = 1.0
 	if not UnderwaterEffect.apply(env, sun, cam_sub, day):
 		UnderwaterEffect.reset(sun, env)
+	rays.update(cam.global_position, cam.global_position.normalized(), -sun.global_transform.basis.z, cam_sub, day * (1.0 - _dark))
+	world.water.set_sun(-sun.global_transform.basis.z, day * (1.0 - _dark), cam.global_position.normalized())
 	# trees between the camera and the player fade out (dithered), and so does a crown the camera is inside
 	RenderingServer.global_shader_parameter_set("tree_cam", Vector4(cam.global_position.x, cam.global_position.y, cam.global_position.z, 0.0))
 	tree_fade.update(world.chunks, cam.global_position, player.global_position + player.global_position.normalized() * 0.5, delta)     # whole trees in the line of sight fade
@@ -584,7 +598,7 @@ func _update_hud(day: float) -> void:
 		+ "%s\n" % physics.stats()
 		+ "%s   FPS %d\n\n" % ["FLY" if player.fly else "ROLL", Engine.get_frames_per_second()]
 		+ aim.describe(world)
-		+ "[WASD] move (relative to the camera)\n[Space] jump / swim up\n[Ctrl] dive\n[F] fly\n[R] respawn\n[F4] cave spawn (Shift: sinkhole)\n[mouse] look around (the cross in the middle is the tool aim)\n[LMB] use the tool   [Esc] free the mouse\n[Q] next tool   [1-9] bar slot   [Tab / I] inventory\n[T] plant a torch   [C] collect it   hold [E] gear wheel\n[Shift+LMB] place stone (pickaxe)\n"
+		+ "[WASD] move (relative to the camera)\n[Space] jump / swim up\n[Ctrl] dive\n[F] fly (mouse against the top / bottom of the circle: climb / dive, Shift: boost)\n[R] respawn\n[F4] cave spawn (Shift: sinkhole)\n[mouse] look around (the cross in the middle is the tool aim)\n[LMB] use the tool   [Esc] free the mouse\n[Q] next tool   [1-9] bar slot   [Tab / I] inventory\n[T] plant a torch   [C] collect it   hold [E] gear wheel\n[Shift+LMB] place stone (pickaxe)\n"
 		+ "[wheel / +/-] radar zoom\n[Ctrl+wheel] camera\n[Esc] free mouse")
 
 ## The nearest cave of either kind: a closed room (dark, fine) or a sinkhole floor open to the sky (daylight).
@@ -1226,6 +1240,10 @@ func _input(event: InputEvent) -> void:
 		var radius := vsize.y * PERIMETER
 		if off.length() > radius:
 			var edge: Vector2 = centre + off.normalized() * radius
-			cam.turn(np - edge)                                # only the outward push
+			var push: Vector2 = np - edge                      # only the outward push
+			if player.steers_pitch():
+				player.steer_pitch(push.y)                     # flying or diving: against the top of the circle = up, the bottom = down
+				push.y = 0.0                                   # (the camera only turns sideways)
+			cam.turn(push)
 			np = edge
 		_vcur = np
