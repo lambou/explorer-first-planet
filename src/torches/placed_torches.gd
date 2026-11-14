@@ -72,6 +72,31 @@ func pick_up(origin: Vector3, dir: Vector3, from: Vector3, reach: float) -> Dict
 	_remove(best)
 	return got
 
+## The planted torch nearest to `from` within `radius` metres (the collect perimeter): {"point", "id", "fuel"}, or {}.
+func nearest(from: Vector3, radius: float) -> Dictionary:
+	var best := -1
+	var best_d := radius
+	for i in _list.size():
+		var d: float = (_list[i].point as Vector3).distance_to(from)
+		if d <= best_d:
+			best_d = d
+			best = i
+	if best < 0:
+		return {}
+	return {"point": _list[best].point, "id": _list[best].id, "fuel": _list[best].fuel}
+
+## Collect the nearest torch within the perimeter (removed from the world): {"id", "fuel"}, or {}.
+func pick_nearest(from: Vector3, radius: float) -> Dictionary:
+	var n := nearest(from, radius)
+	if n.is_empty():
+		return {}
+	for i in _list.size():
+		if (_list[i].point as Vector3) == (n.point as Vector3):
+			var got := {"id": _list[i].id, "fuel": _list[i].fuel}
+			_remove(i)
+			return got
+	return {}
+
 ## The planted torches as plain data (for the save), and back.
 func to_data() -> Array:
 	var out: Array = []

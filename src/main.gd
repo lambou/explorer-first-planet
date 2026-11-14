@@ -4,6 +4,7 @@ extends Node3D
 const R := WorldConfig.PLANET_RADIUS
 const DAY_LENGTH := 480.0   # seconds for one full turn of the sun (at least 6 minutes)
 const REACH := 8.0
+const COLLECT_RADIUS := 3.0            # metres around the player inside which a collectible is ringed and [C] takes it
 const AXIAL_TILT := 23.4    # degrees: the planet's axis is tilted like the Earth's, which gives latitudes real days, seasons, polar day/night
 const YEAR_DAYS := 24.0     # a year lasts this many days
 
@@ -365,6 +366,13 @@ func _process(delta: float) -> void:
 	if aim.target.kind != "none":
 		cstate = 2 if not aim.target.in_reach else (3 if aim.target.kind == "rock" else 1)
 	hud.aim_overlay.update_state(_vcur, cstate, aiming, vsize * 0.5, vsize.y * PERIMETER)
+	# a collectible inside the collect perimeter is ringed on screen with the key that takes it
+	var spot := torches.nearest(player.global_position, COLLECT_RADIUS) if aiming else {}
+	if not spot.is_empty() and not cam.is_position_behind(spot.point):
+		var def := ToolCatalog.get_def(spot.id)
+		hud.hints.show_collect(cam.unproject_position(spot.point + player.global_position.normalized() * 0.5), "C", "Collect %s" % def.name.to_lower())
+	else:
+		hud.hints.hide_collect()
 	_tool_cd -= delta
 	kit.update(delta)
 	# one use per click: holding the button does not repeat. The tool swings first; the world changes when it lands (_on_tool_struck)
@@ -576,7 +584,7 @@ func _update_hud(day: float) -> void:
 		+ "%s\n" % physics.stats()
 		+ "%s   FPS %d\n\n" % ["FLY" if player.fly else "ROLL", Engine.get_frames_per_second()]
 		+ aim.describe(world)
-		+ "[WASD] move (relative to the camera)\n[Space] jump / swim up\n[Ctrl] dive\n[F] fly\n[R] respawn\n[C] cave spawn (Shift: sinkhole)\n[mouse] look around (the cross in the middle is the tool aim)\n[LMB] use the tool   [Esc] free the mouse\n[Q] next tool   [1-9] bar slot   [Tab / I] inventory\n[T] plant a torch   [E] pick it up\n[Shift+LMB] place stone (pickaxe)\n"
+		+ "[WASD] move (relative to the camera)\n[Space] jump / swim up\n[Ctrl] dive\n[F] fly\n[R] respawn\n[F4] cave spawn (Shift: sinkhole)\n[mouse] look around (the cross in the middle is the tool aim)\n[LMB] use the tool   [Esc] free the mouse\n[Q] next tool   [1-9] bar slot   [Tab / I] inventory\n[T] plant a torch   [C] collect it   hold [E] gear wheel\n[Shift+LMB] place stone (pickaxe)\n"
 		+ "[wheel / +/-] radar zoom\n[Ctrl+wheel] camera\n[Esc] free mouse")
 
 ## The nearest cave of either kind: a closed room (dark, fine) or a sinkhole floor open to the sky (daylight).
@@ -1149,11 +1157,11 @@ func _place_torch() -> void:
 	tool_user.plant_torch(aim.target)
 	autosave.request()
 
-## [E]: pick up the planted torch the mouse points at.
+## [C]: collect the planted torch inside the collect perimeter around the player (the one the ring on screen marks).
 func _pickup_torch() -> void:
 	if not _aiming:
 		return
-	var got := torches.pick_up(cam.project_ray_origin(_vcur), cam.project_ray_normal(_vcur), player.global_position, aim.reach)
+	var got := torches.pick_nearest(player.global_position, COLLECT_RADIUS)
 	if not got.is_empty():
 		kit.belt.add(got.id, 1, got.fuel)                  # it keeps the fuel it has left
 		autosave.request()
@@ -1177,8 +1185,8 @@ func _capture_save() -> Dictionary:
 func _use_tool(place: bool) -> String:
 	return tool_user.use("pickaxe", aim.target, player.global_position, place)
 
-## [C]: move to the floor of the nearest cave (open or closed; this becomes the respawn point too).
-## Shift+C: the nearest sinkhole floor (a shaft open to the sky).
+## [F4]: move to the floor of the nearest cave (open or closed; this becomes the respawn point too).
+## Shift+F4: the nearest sinkhole floor (a shaft open to the sky).
 func _spawn_in_cave() -> void:
 	var cs := _cave_spawn_from(player.global_position.normalized(), Input.is_key_pressed(KEY_SHIFT))
 	if cs == Vector3.ZERO:
@@ -1200,9 +1208,9 @@ func _unhandled_input(event: InputEvent) -> void:
 		match event.physical_keycode:
 			KEY_F: player.toggle_fly()
 			KEY_R: player.respawn()
-			KEY_C: _spawn_in_cave()
+			KEY_F4: _spawn_in_cave()
 			KEY_T: _place_torch()
-			KEY_E: _pickup_torch()
+			KEY_C: _pickup_torch()
 			KEY_ESCAPE: _mouse_freed = true                          # give the mouse back (click in the window to take it again)
 	elif event is InputEventMouseButton and event.pressed and _mouse_freed and not hud.menu_open():
 		_mouse_freed = false                                       # this click only takes the mouse back: no swing

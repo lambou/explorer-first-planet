@@ -1,7 +1,7 @@
 class_name GearWheel
 extends Control
-## The quick gear menu (hold [G], like Resident Evil 4's item wheel): the tools in a ring around the screen centre. Point at one
-## and release [G] (or click it) to take it in hand. The mouse is free while it is open, so nothing is swung.
+## The quick gear menu (hold [E], like Resident Evil 4's item wheel): the tools in a ring around the screen centre. Point at one
+## and release [E] (or click it) to take it in hand. The mouse is free while it is open, so nothing is swung.
 ## Display and choice only: it reads the Toolbelt and tells whoever owns it which tool was picked.
 
 signal picked(index: int)
@@ -92,4 +92,4 @@ func _draw() -> void:
 		var d := ToolCatalog.get_def(_belt.tools[shown])
 		UiTheme.text(self, c + Vector2(-120, -6), d.name, 20, UiTheme.SELECTED if _hover >= 0 else UiTheme.TEXT, HORIZONTAL_ALIGNMENT_CENTER, 240)
 		UiTheme.text(self, c + Vector2(-120, 18), d.hint, 12, UiTheme.TEXT_DIM, HORIZONTAL_ALIGNMENT_CENTER, 240)
-	UiTheme.text(self, c + Vector2(-200, RING + ICON + 24), "Point and release [G] / click to equip   -   right click or Esc to cancel", 12, UiTheme.TEXT_DIM, HORIZONTAL_ALIGNMENT_CENTER, 400)
+	UiTheme.text(self, c + Vector2(-200, RING + ICON + 24), "Point and release [E] / click to equip   -   right click or Esc to cancel", 12, UiTheme.TEXT_DIM, HORIZONTAL_ALIGNMENT_CENTER, 400)

@@ -38,7 +38,7 @@ The world systems (`RockSystem`, `TreeSystem`) no longer keep an inventory: a bl
   shows a fuel bar and the time left); a planted torch burns on its own; a torch not in hand and not planted does not. The last 45 s the
   flame and its light sink, then it goes out and is gone. Held, the flame is a real light of its own (a few metres, falling off with
   distance, flickering). `[T]` (or `LMB` with the torch in hand) **plants** one where the mouse points, on the ground or a wall (not a
-  ceiling): both hands stay on the pickaxe. `[E]` on a planted torch **picks it up**, keeping the fuel it has left. A torch whose ground is
+  ceiling): both hands stay on the pickaxe. `[C]` near a planted torch **collects it** (a ring marks it within 3 m), keeping the fuel it has left. A torch whose ground is
   dug away falls back to the belt. Nothing is attached to the ball. (`Toolbelt` fuel, `PlacedTorches`, `TorchFlame`.)
 - **Tools.** Start: pickaxe (dig, break rocks, chop) and bucket (scoop 5 l at a time, holds 10 l; the water is carried and weighs).
   Models are built in Blender and shown in use: the pickaxe winds up and drives its point into the target, the bucket dips into the water.

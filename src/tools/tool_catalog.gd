@@ -15,8 +15,8 @@ static func _ensure() -> void:
 	for t: ToolDef in [
 		ToolDef.make("pickaxe", "Pickaxe", ToolDef.MINE, "Dig the ground, break rocks, chop trees"),
 		ToolDef.make("bucket", "Bucket", ToolDef.SCOOP, "Scoop water (holds %d litres)" % BUCKET_LITRES),
-		ToolDef.make("torch", "Fuel Torch", ToolDef.LIGHT, "Big torch, burns 15 minutes. [T] plants it where you point, [E] picks it up again"),
-		ToolDef.make("torch_bundle", "Bundle Torch", ToolDef.LIGHT, "Small torch, burns 5 minutes. [T] plants it where you point, [E] picks it up again"),
+		ToolDef.make("torch", "Fuel Torch", ToolDef.LIGHT, "Big torch, burns 15 minutes. [T] plants it where you point, [C] collects it again"),
+		ToolDef.make("torch_bundle", "Bundle Torch", ToolDef.LIGHT, "Small torch, burns 5 minutes. [T] plants it where you point, [C] collects it again"),
 	]:
 		if t.id == "torch":
 			t.burn_seconds = 900.0                        # the coal-wrapped torch: big, burns 15 minutes

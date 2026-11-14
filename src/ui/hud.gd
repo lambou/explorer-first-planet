@@ -18,6 +18,7 @@ var inventory_bar: InventoryBar
 var menu: InventoryMenu
 var toasts: ToastFeed
 var gear: GearWheel
+var hints: KeyHints
 var _kit: PlayerKit
 
 func _ready() -> void:
@@ -58,6 +59,8 @@ func _ready() -> void:
 	add_child(menu)
 	menu.message.connect(toasts.push)
 	menu.closed.connect(func() -> void: set_menu_open(false))
+	hints = KeyHints.new()
+	add_child(hints)
 	gear = GearWheel.new()
 	add_child(gear)
 
@@ -72,7 +75,21 @@ func bind(kit: PlayerKit) -> void:
 	kit.harvester.gathered.connect(_on_gathered)
 	kit.torch_burnt_out.connect(func() -> void: toasts.push("Your torch burnt out", UiTheme.WARN))
 	kit.belt.selected.connect(func(id: String) -> void: toasts.push(ToolCatalog.get_def(id).name))
-	toasts.push("[Tab]/[I] inventory and crafting   [Q] next tool   hold [G] gear wheel   [T] plant a torch   [E] pick it up   [F3] info   [Esc] mouse")
+	toasts.push("Keys are listed at the bottom left   [F3] info")
+
+## The key caps at the bottom left: only what can be done now (no torch in the bag, no [T]).
+func _process(_delta: float) -> void:
+	if _kit == null:
+		return
+	var keys: Array = []
+	if not menu_open():
+		keys.append(["E", "Gear (hold)"])
+		keys.append(["Q", "Next tool"])
+		keys.append(["Tab", "Inventory / craft"])
+		if _kit.belt.torch_to_plant() != "":
+			keys.append(["T", "Plant torch"])
+		keys.append(["Esc", "Free mouse"])
+	hints.set_keys(keys)
 
 func toggle_info() -> void:
 	_label.visible = not _label.visible
@@ -111,9 +128,9 @@ func _on_gathered(item_id: String, added: int, wanted: int) -> void:
 
 ## `_input`, not `_unhandled_input`: the UI's own focus handling (Tab walks the buttons) must never swallow these keys.
 func _input(event: InputEvent) -> void:
-	if enabled and _kit != null and event is InputEventKey and event.physical_keycode == KEY_G and not event.echo:
+	if enabled and _kit != null and event is InputEventKey and event.physical_keycode == KEY_E and not event.echo:
 		if event.pressed and not menu.visible and not gear.visible:
-			gear.open()                                     # hold [G]: the gear wheel, release on a tool to equip it
+			gear.open()                                     # hold [E]: the gear wheel, release on a tool to equip it
 		elif not event.pressed and gear.visible:
 			gear.close(true)
 		return
