@@ -135,6 +135,14 @@ func _rest(up: Vector3, fwd: Vector3, right: Vector3) -> Dictionary:
 		if hw != null:
 			hand = hw
 	hand += bob
+	var rest := _rest_pose(hand, up, right, fwd)
+	if character != null:
+		var fw := character.fly_weight()
+		if fw > 0.001:                                                  # cruising: the tool is carried out of the raised fist, along the flight
+			rest.h = (rest.h as Vector3).slerp(character.fly_dir(), fw)
+	return rest
+
+func _rest_pose(hand: Vector3, up: Vector3, right: Vector3, fwd: Vector3) -> Dictionary:
 	match _tool.action:
 		ToolDef.SCOOP:
 			var sway := sin(_t * 1.7) * 0.07

@@ -4,7 +4,7 @@ extends Node3D
 ## kept: no bodies, no collisions; one MultiMesh draws every puff (one draw call) and the oldest are recycled. Display only: PlayerCharacter
 ## decides when and where (a boot lands, a slide, a splash).
 
-const MAX := 160
+const MAX := 480
 const SPRING := 0.9            # how fast a dust puff rises (m/s along the planet's up), a hot breath of ground
 const DRAG := 2.6
 
@@ -17,6 +17,8 @@ var _size := PackedFloat32Array()
 var _grow := PackedFloat32Array()      # > 0: the puff swells as it fades (dust); < 0: it only shrinks (droplets)
 var _grav := PackedFloat32Array()      # 0 = dust (rises and thins), > 0 = pulled down (droplets)
 var _col := PackedColorArray()
+var _stretch := PackedFloat32Array()   # > 0: a streak, stretched along _dir by this factor
+var _dir := PackedVector3Array()       # the direction a streak points along
 var _n := 0
 var _rng := RandomNumberGenerator.new()
 
@@ -52,6 +54,8 @@ func _init() -> void:
 		_grow.append(0.0)
 		_grav.append(0.0)
 		_col.append(Color.WHITE)
+		_stretch.append(0.0)
+		_dir.append(Vector3.FORWARD)
 	_rng.seed = 777
 
 func active() -> int:
@@ -75,9 +79,50 @@ func dust(point: Vector3, away: Vector3, up: Vector3, ground: Color, count: int,
 		_life[k] = _span[k]
 		_size[k] = size * _rng.randf_range(0.7, 1.3)
 		_grow[k] = 1.6
+		_stretch[k] = 0.0
 		_grav[k] = 0.0
 		col.a = 0.5
 		_col[k] = col
+
+## A glowing puff that coasts (no rise, little drag) and shrinks away: the trail of a flier.
+func glow(point: Vector3, vel: Vector3, size: float, color: Color) -> void:
+	var k := _slot()
+	_pos[k] = point + Vector3(_rng.randf_range(-1, 1), _rng.randf_range(-1, 1), _rng.randf_range(-1, 1)) * 0.05
+	_vel[k] = vel
+	_span[k] = _rng.randf_range(0.35, 0.6)
+	_life[k] = _span[k]
+	_size[k] = size
+	_grow[k] = -0.7
+	_grav[k] = -1.0
+	_stretch[k] = 0.0
+	_col[k] = color
+
+## A little bubble: it rises slowly, swells a touch and pops (the trail of a diver).
+func bubble(point: Vector3, vel: Vector3, size: float) -> void:
+	var k := _slot()
+	_pos[k] = point + Vector3(_rng.randf_range(-1, 1), _rng.randf_range(-1, 1), _rng.randf_range(-1, 1)) * 0.08
+	_vel[k] = vel
+	_span[k] = _rng.randf_range(0.9, 1.6)
+	_life[k] = _span[k]
+	_size[k] = size
+	_grow[k] = 0.4
+	_grav[k] = 0.0
+	_stretch[k] = 0.0
+	_col[k] = Color(0.85, 0.96, 1.0, 0.6)
+
+## A thin line of wind, fixed in the world and pointing along `dir`, `length` times its width; it appears and fades fast as he rushes past.
+func streak(point: Vector3, dir: Vector3, length: float, size: float, color: Color) -> void:
+	var k := _slot()
+	_pos[k] = point
+	_vel[k] = Vector3.ZERO
+	_span[k] = _rng.randf_range(0.18, 0.32)
+	_life[k] = _span[k]
+	_size[k] = size
+	_grow[k] = 0.0
+	_grav[k] = -1.0
+	_stretch[k] = length / maxf(size, 0.001)
+	_dir[k] = dir
+	_col[k] = color
 
 ## `count` water droplets and foam at `point` (on the water's surface), thrown up and out.
 func splash(point: Vector3, away: Vector3, up: Vector3, count: int, size: float) -> void:
@@ -121,11 +166,15 @@ func _process(delta: float) -> void:
 			_grow[i] = _grow[_n]
 			_grav[i] = _grav[_n]
 			_col[i] = _col[_n]
+			_stretch[i] = _stretch[_n]
+			_dir[i] = _dir[_n]
 			continue
 		var up := _pos[i].normalized()
 		var v := _vel[i]
 		if _grav[i] > 0.0:
 			v -= up * _grav[i] * delta
+		elif _grav[i] < 0.0:
+			v *= exp(-1.0 * delta)                   # coasting: no rise
 		else:
 			v *= exp(-DRAG * delta)
 			v += up * SPRING * delta
@@ -137,6 +186,11 @@ func _process(delta: float) -> void:
 		var s := _size[j] * (1.0 + _grow[j] * u)
 		var c := _col[j]
 		c.a *= (1.0 - u) * minf(1.0, u * 12.0 + 0.35)                  # thins out as it ages, appears at once
-		_mm.set_instance_transform(j, Transform3D(Basis().scaled(Vector3.ONE * maxf(s, 0.001)), _pos[j]))
+		var sc := maxf(s, 0.001)
+		if _stretch[j] > 0.0:
+			var b := Basis.looking_at(_dir[j], _pos[j].normalized()) * Basis.from_scale(Vector3(sc, sc, sc * _stretch[j]))
+			_mm.set_instance_transform(j, Transform3D(b, _pos[j]))
+		else:
+			_mm.set_instance_transform(j, Transform3D(Basis().scaled(Vector3.ONE * sc), _pos[j]))
 		_mm.set_instance_color(j, c)
 	_mm.visible_instance_count = _n

@@ -9,9 +9,9 @@ extends RefCounted
 ## Display only; call once per frame after the normal day/night light values are set.
 
 const VISIBILITY := 24.0           # metres of clear view in bright shallow water
-const LIGHT_DEPTH := 70.0          # e-folding depth of the light
-const SHALLOW := Color(0.07, 0.38, 0.45)
-const DEEP := Color(0.01, 0.07, 0.17)
+const LIGHT_DEPTH := 45.0          # e-folding depth of the light
+const SHALLOW := Color(0.04, 0.27, 0.36)
+const DEEP := Color(0.005, 0.04, 0.11)
 
 const BLEND := 0.12                # metres around the surface over which the look changes (no snap, no dead zone)
 

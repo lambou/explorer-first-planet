@@ -52,11 +52,28 @@ var _foot_n: Array = [Vector3.UP, Vector3.UP]
 var _tilt := 0.0                        # how far the body leans into the slope under it (0 level .. 1 the slope's own angle, smoothed)
 var _slide := 0.0                       # 0 .. 1: sliding down a slope too steep to stand on (smoothed): boots planted, arms out, leaning back
 var _swim := 0.0                        # 0 .. 1: swimming (smoothed): lying in the water, arms stroking, legs kicking
+var _fly := 0.0                         # 0 .. 1: flying (smoothed): the superhero pose, prone with a fist forward, boots together, cape streaming
+var _fly_lean := 0.0                    # the body's pitch in flight (radians, smoothed): upright (straight up) .. prone (level) .. head down (diving)
+var _wet := 0.0                         # 0 .. 1: flying under water (smoothed): streamlined, hands together, kicking, no cape, bubbles
+var _was_in_w := false
+var _cruise := 0.0                      # 0 hovering .. 1 cruising (smoothed): the hover is relaxed, the cruise is the superhero pose
+var _fist1 := Vector3.ZERO              # where the right hand is held in the cruise (model space): the tool goes there
+var _fly_s := 0.0                       # flight speed over the cruising speed (smoothed)
+var _cape: MeshInstance3D
+var _cape_mesh: ImmediateMesh
+var _acc_trail := 0.0
+var _acc_wind := 0.0
+var _swim_lean := 0.15                  # the body's pitch in the water (radians, smoothed): upright when floating still, prone when swimming, along the dive
+var _mv := 0.0                          # 0 still .. 1 moving (smoothed): strokes, lean and sculling follow it
 var _swim_t := 0.0                      # the stroke cycle
 var _drop := 0.0                        # how far the body sinks towards ground that lies below the flat-ground soles (steep slopes)
 var fx: PlayerFx                        # the dust and spray
 var _prev_c := [0.0, 0.0]               # cos of each boot's cycle last frame: a boot lands when it turns from > 0 to <= 0
 var _was_swim := false
+var _acc_rip := 0.0                     # time since the last ring on the water
+var _acc_frip := 0.0
+var _ring: MeshInstance3D               # the soft ring on the water round a floating swimmer
+var _ring_a := 0.0
 var _landed := false
 var _acc_slide := 0.0
 var _acc_foam := 0.0
@@ -97,6 +114,38 @@ func setup(p_ball: BallPlayer, p_rig: ToolRig) -> void:
 	_hands = [_model.find_child("HandL", true, false), _model.find_child("HandR", true, false)]
 	for n: Node3D in _feet + _hands:
 		_rest[n] = n.position
+	_ring = MeshInstance3D.new()                  # a flat ring on the water round the floating body: it looks like it displaces the water
+	var rq := QuadMesh.new()
+	rq.size = Vector2(1.5, 1.5)
+	_ring.mesh = rq
+	var rsh := Shader.new()
+	rsh.code = "shader_type spatial;
+render_mode unshaded, cull_disabled, depth_draw_never;
+uniform float alpha = 0.5;
+void fragment() {
+	float r = length(UV - vec2(0.5)) * 2.0;
+	float ring = smoothstep(0.62, 0.74, r) * (1.0 - smoothstep(0.78, 0.92, r));
+	ALBEDO = vec3(0.93, 0.97, 1.0);
+	ALPHA = ring * alpha;
+}
+"
+	var rmat := ShaderMaterial.new()
+	rmat.shader = rsh
+	_ring.material_override = rmat
+	_ring.top_level = true
+	_ring.visible = false
+	_ring.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	add_child(_ring)
+	_cape_mesh = ImmediateMesh.new()
+	_cape = MeshInstance3D.new()
+	_cape.mesh = _cape_mesh
+	var cm := StandardMaterial3D.new()
+	cm.albedo_color = Color(0.82, 0.13, 0.17)
+	cm.roughness = 0.8
+	cm.cull_mode = BaseMaterial3D.CULL_DISABLED
+	_cape.material_override = cm
+	_cape.visible = false
+	_model.add_child(_cape)
 	if rig != null and rig.cam != null:
 		facing = rig.cam.view_fwd
 
@@ -105,7 +154,7 @@ func _process(delta: float) -> void:
 		return
 	_t += delta
 	visible = ball.visible
-	var p := ball.global_position
+	var p := ball.render_pos()
 	var up := p.normalized()
 	var v := ball.linear_velocity
 	var vv := v.dot(up)
@@ -127,7 +176,7 @@ func _process(delta: float) -> void:
 		facing = _flat(_flat(facing, up, want).slerp(want, 1.0 - exp(-delta * 9.0)), up, want)
 	# on a slope he leans into it (the boots then reach the ground under them instead of dangling), more when he slides
 	var tilt_want := 0.0
-	if ball.grounded and ball.in_water < 0.5:
+	if ball.grounded and not ball.swimming:
 		tilt_want = clampf(ball.slope_deg / 40.0, 0.0, 1.0) * (0.85 if ball.sliding else 0.6)
 	_tilt = lerpf(_tilt, tilt_want, 1.0 - exp(-delta * 8.0))
 	var body_up := up
@@ -143,7 +192,7 @@ func _process(delta: float) -> void:
 		_dirm = _dirm.normalized()
 
 	# air / ground and the landing squash
-	var in_air := not ball.grounded and ball.in_water < 0.5
+	var in_air := (not ball.grounded and not ball.swimming) or ball.fly
 	_air = lerpf(_air, 1.0 if in_air else 0.0, 1.0 - exp(-delta * 14.0))
 	if _was_air and not in_air:
 		_land = 1.0
@@ -151,13 +200,31 @@ func _process(delta: float) -> void:
 	_was_air = in_air
 	_land = move_toward(_land, 0.0, delta * 4.5)
 	_slide = lerpf(_slide, 1.0 if ball.sliding else 0.0, 1.0 - exp(-delta * 10.0))
-	var swimming := ball.in_water > 0.5
+	var swimming := ball.swimming and not ball.fly                  # flying under water is its own pose (_wet), not the swimmer's
+	_wet = lerpf(_wet, 1.0 if (ball.fly and ball.swimming) else 0.0, 1.0 - exp(-delta * 6.0))
 	_swim = lerpf(_swim, 1.0 if swimming else 0.0, 1.0 - exp(-delta * 6.0))
-	_swim_t += delta * (4.0 + _speed * 1.2) * _swim
+	var vlen := v.length()
+	_mv = lerpf(_mv, smoothstep(0.3, 1.8, vlen), 1.0 - exp(-delta * 6.0))
+	var surfacing := ball.swim_state == BallPlayer.SwimState.SURFACE or ball.swim_state == BallPlayer.SwimState.NONE
+	var swim_target := lerpf(0.15, 0.7, _mv)                                  # floating at the surface: upright when still, chest-low when it swims
+	if not surfacing:                                                         # diving / deep: hangs head-up when still, lies along the swim when it moves
+		var elev := asin(clampf(vv / maxf(vlen, 0.001), -1.0, 1.0))
+		swim_target = lerpf(0.5, clampf(1.45 - elev, 0.0, 2.7), _mv)
+	_swim_lean = lerpf(_swim_lean, swim_target, 1.0 - exp(-delta * 5.0))
+	_swim_t += delta * lerpf(1.2, 3.0 + vlen * 1.2, _mv) * _swim              # a still swimmer treads slowly; the stroke rate follows the speed
+	_fly = lerpf(_fly, 1.0 if ball.fly else 0.0, 1.0 - exp(-delta * 7.0))
+	_cruise = lerpf(_cruise, smoothstep(2.0, 10.0, v.length()) if ball.fly else 0.0, 1.0 - exp(-delta * 5.0))
+	_fly_s = lerpf(_fly_s, clampf(v.length() / BallPlayer.FLY_SPEED, 0.0, 1.3), 1.0 - exp(-delta * 5.0))
+	if ball.fly:
+		var elev := asin(clampf(vv / maxf(v.length(), 0.001), -1.0, 1.0))     # +: climbing, -: diving
+		var lean_target := lerpf(0.2, clampf(1.45 - elev, 0.0, 2.7), smoothstep(0.5, 6.0, v.length()))   # hovering: nearly upright, a fist raised
+		lean_target = lerpf(lean_target, maxf(lean_target, 1.15), _wet)          # under water he lies streamlined even when he is almost still
+		_fly_lean = lerpf(_fly_lean, lean_target, 1.0 - exp(-delta * 6.0))
 	var avg_y := (float(_probe[0].y) + float(_probe[1].y)) * 0.5
-	var drop_want := clampf(-0.5 - avg_y, -0.1, 0.45) if (ball.grounded and not swimming) else 0.0
+	var drop_want := clampf(-0.5 - avg_y, -0.1, 0.45) if (ball.grounded and not swimming and not ball.fly) else 0.0
 	_drop = lerpf(_drop, drop_want, 1.0 - exp(-delta * 10.0))
-	_model.position.y = 0.5 * (SCALE - 1.0) - _drop
+	var hover := _fly * (1.0 - _cruise)
+	_model.position.y = 0.5 * (SCALE - 1.0) - _drop + sin(_t * 2.2) * 0.07 * hover          # hovering: floats gently up and down
 
 	var amp := clampf(_speed / FULL_SPEED, 0.0, 1.0)
 	_run = _speed > RUN_AT or (ball.running and _speed > 1.2)                  # Shift held: it runs as soon as it moves
@@ -173,6 +240,7 @@ func _process(delta: float) -> void:
 	_animate_feet(delta, vv, amp)
 	_animate_hands(delta, amp, run)
 	_animate_sprout(delta, vv, amp)
+	_animate_cape()
 	_blink_eyes(delta)
 	_emit_fx(delta, up, vt, swimming)
 
@@ -180,10 +248,22 @@ func _process(delta: float) -> void:
 func hand_rest_world() -> Variant:
 	if _model == null or _hands.size() < 2:
 		return null
-	return _model.to_global(_rest[_hands[1]])
+	var shift := ball.render_pos() - global_position if ball.fly else Vector3.ZERO      # the character is about to move by this (it updates after the tool)
+	return _model.to_global((_rest[_hands[1]] as Vector3).lerp(_fist1, _pose_w())) + shift
+
+## How much the tool is carried forward along the flight (0 = as on the ground), and the way the handle then points: out of the raised fist.
+func fly_weight() -> float:
+	return smoothstep(0.2, 0.8, _pose_w())
+
+## How far the flight pose (boots together, hands forward) is on: the cruise, or any flight under water.
+func _pose_w() -> float:
+	return _fly * maxf(_cruise, _wet)
+
+func fly_dir() -> Vector3:
+	return _body.global_transform.basis.y if _body != null else Vector3.UP
 
 func _animate_body(delta: float, vv: float, amp: float, use: float) -> void:
-	var go := smoothstep(0.15, 0.7, _speed) * (1.0 - _slide) * (1.0 - _swim)                       # 0 standing .. 1 moving
+	var go := smoothstep(0.15, 0.7, _speed) * (1.0 - _slide) * (1.0 - _swim) * (1.0 - _fly)        # 0 standing .. 1 moving
 	var contact := absf(sin(_phase))                              # 1 when a boot is planted out in front or behind, 0 when one passes under the body
 	var sy := 1.0 + 0.014 * sin(_t * 2.4)                         # breathing
 	sy += go * lerpf(0.05, 0.09, _run_t) * (1.0 - 2.0 * contact) * (1.0 - _air)   # stretches passing over the boot, squashes at each step
@@ -193,7 +273,9 @@ func _animate_body(delta: float, vv: float, amp: float, use: float) -> void:
 	var lean := go * lerpf(0.16, 0.42, _run_t) * clampf(0.6 + amp, 0.0, 1.0)
 	if use >= 0.0:
 		lean = _swing_lean(use)
-	lean += -0.32 * _slide + 1.1 * _swim               # sliding: leaning back on his heels; swimming: lying face down
+	lean += -0.32 * _slide                             # sliding: leaning back on his heels
+	lean = lerpf(lean, _swim_lean, _swim)               # swimming: upright treading .. chest-low .. along the dive
+	lean = lerpf(lean, _fly_lean, _fly)                 # flying: the body lies along the flight path
 	_lean = lerpf(_lean, lean, 1.0 - exp(-delta * 16.0))
 	var bob := (1.0 - contact) * lerpf(0.07, 0.15, _run_t) * go * (1.0 - _air)      # up over each planted boot, a bounce per step
 	_body.scale = Vector3(sx, sy, sx)
@@ -201,9 +283,10 @@ func _animate_body(delta: float, vv: float, amp: float, use: float) -> void:
 	var roll := sin(_phase) * lerpf(0.07, 0.13, _run_t) * go * (1.0 - _air)        # sways side to side with the steps
 	var twist := sin(_phase) * lerpf(0.10, 0.22, _run_t) * go * (1.0 - _air) if use < 0.0 else 0.0     # the body turns with the swinging arms
 	# leans into the way he moves (forward, back or sideways), not just the way he looks
-	var lean_dir := _dirm if (use < 0.0 and _swim < 0.5) else Vector2(0, -1)
+	var lean_dir := _dirm if (use < 0.0 and _swim < 0.5 and _fly < 0.5) else Vector2(0, -1)
 	_head = lerpf(_head, clampf(look_pitch * 0.5, -0.5, 0.5), 1.0 - exp(-delta * 20.0))      # the face tips up and down with the camera
-	_body.rotation = Vector3(_lean * lean_dir.y + _head, twist, roll - _lean * lean_dir.x)
+	var bank := -clampf((global_transform.basis.inverse() * ball.linear_velocity).x / 25.0, -0.5, 0.5) * _fly + sin(_t * 1.6) * 0.05 * _fly * (1.0 - _cruise)      # banks into a sideways turn; hovering: a slow sway
+	_body.rotation = Vector3(_lean * lean_dir.y + _head * (1.0 - _fly), twist, roll - _lean * lean_dir.x + bank)
 
 ## The body's lean over a swing: back for the wind-up, hard forward at the blow, then up again (u = progress of the use).
 func _swing_lean(u: float) -> float:
@@ -214,7 +297,7 @@ func _swing_lean(u: float) -> float:
 	return lerpf(0.55, 0.0, smoothstep(ToolRig.IMPACT, 1.0, u))
 
 func _animate_feet(delta: float, vv: float, amp: float) -> void:
-	var go := smoothstep(0.15, 0.7, _speed) * (1.0 - _slide) * (1.0 - _swim)
+	var go := smoothstep(0.15, 0.7, _speed) * (1.0 - _slide) * (1.0 - _swim) * (1.0 - _fly)
 	# the stride that matches the cycle: the planted boot moves back exactly as fast as the ground goes by (no sliding at any speed)
 	var stride := go / (_k * SCALE)
 	var lift := go * lerpf(0.17, 0.32, _run_t)                    # a run lifts the knees higher
@@ -241,10 +324,22 @@ func _animate_feet(delta: float, vv: float, amp: float) -> void:
 		var roll := clampf(-atan2(n.x, n.y), -0.9, 0.9)                                # and the boot tilts sideways with it
 		var toe := _dirm.y * sin(ph) * 0.55 * go + maxf(0.0, cos(ph)) * 0.25 * go     # toes up at the heel strike, pushing off behind
 		f.rotation = Vector3(lerpf(pitch + toe, 0.5 * tuck, _air), 0, lerpf(roll, 0.0, _air))
-		if _swim > 0.01:                                                               # swimming: the legs trail behind the lying body and kick
+		if _swim > 0.01:                                                               # swimming: upright, the boots pedal under the body; leaning, they trail behind and kick
 			var kick := sin(_swim_t * 2.6 + PI * i)
-			f.position = f.position.lerp(rest + Vector3(0.0, 0.10 + 0.10 * kick, 0.34 + 0.05 * kick), _swim)
-			f.rotation.x = lerpf(f.rotation.x, 0.8 + 0.25 * kick, _swim)
+			var samp := 0.35 + 0.65 * _mv
+			var down := Basis(Vector3.RIGHT, _body.rotation.x) * Vector3.DOWN             # the boots hang along the body's own axis, whatever its pitch
+			var tail := _body.position + down * 0.66 + Vector3((-0.08 if i == 0 else 0.08), 0.0, 0.0)
+			tail += Vector3(0, 0.05 * kick * samp, 0.07 * kick * samp)                      # pedalling / flutter kick
+			f.position = f.position.lerp(tail, _swim)
+			f.rotation.x = lerpf(f.rotation.x, _body.rotation.x + 0.25 * kick * samp, _swim)
+		if _pose_w() > 0.01:                                                           # cruising / flying under water: the boots together, straight behind the body's axis
+			var down := Basis(Vector3.RIGHT, _body.rotation.x) * Vector3.DOWN
+			var tail := _body.position + down * 0.68 + Vector3((-0.07 if i == 0 else 0.07), 0.0, 0.0)
+			tail += Vector3(0, 0.02, 0) * sin(_t * 9.0 + i * PI) * _fly_s
+			tail += Vector3(0, 0.09, 0) * sin(_t * 8.0 + i * PI) * _wet                # under water the boots kick in turns (a flutter kick)
+			f.position = f.position.lerp(tail, _pose_w())
+			f.rotation.x = lerpf(f.rotation.x, _body.rotation.x, _pose_w())
+			f.rotation.z = lerpf(f.rotation.z, 0.0, _pose_w())
 
 ## What is under each boot: asked of the physics world every physics step (a ray down from above the boot's place).
 func _physics_process(_delta: float) -> void:
@@ -268,7 +363,7 @@ func _animate_sprout(delta: float, vv: float, amp: float) -> void:
 	# trails behind when he moves, bounces with every step, streams up when he falls
 	var bounce := cos(_phase * 2.0) * 0.22 * go
 	_sprout.rotation = Vector3(0.30 * amp * (1.0 + _run_t) + bounce - _air * clampf(vv * 0.03, -0.5, 0.3) + sin(_t * 2.6) * 0.04, 0, sin(_t * 1.9) * 0.06 + sin(_phase) * 0.12 * go)
-	_leaf_spin += delta * 24.0 * _air                 # the rotor spins up with how airborne he is, and stops once he lands
+	_leaf_spin += delta * 24.0 * _air * lerpf(1.0, 0.25, _fly)                 # the rotor spins up with how airborne he is, and stops once he lands
 	for k in _leaves.size():
 		var lf: Node3D = _leaves[k]
 		var rest: Vector3 = _leaf_rest[k]
@@ -281,21 +376,32 @@ func _animate_sprout(delta: float, vv: float, amp: float) -> void:
 		lf.rotation = Vector3(0, -angle * _air, lerpf(flutter, 0.0, _air))
 
 func _animate_hands(delta: float, amp: float, run: bool) -> void:
-	var go := smoothstep(0.15, 0.7, _speed) * (1.0 - _slide) * (1.0 - _swim)
+	var go := smoothstep(0.15, 0.7, _speed) * (1.0 - _slide) * (1.0 - _swim) * (1.0 - _fly)
 	for i in 2:
 		var h: Node3D = _hands[i]
 		var side := -1.0 if i == 0 else 1.0
 		var arm := sin(_phase + PI * i + PI)                                          # opposite to the boot on its side
 		var reach := lerpf(0.22, 0.42, _run_t) * go                                   # how far the arms swing
 		var pos: Vector3 = _rest[h]
-		pos += Vector3(side * (0.03 + 0.05 * _air) + _dirm.x * arm * reach, 0.16 * _air + 0.05 * (1.0 + arm) * go * (0.5 + _run_t), _dirm.y * arm * reach)
+		pos += Vector3(side * (0.03 + 0.05 * _air * (1.0 - _fly)) + _dirm.x * arm * reach, 0.16 * _air * (1.0 - _fly) + 0.05 * (1.0 + arm) * go * (0.5 + _run_t), _dirm.y * arm * reach)
 		pos += Vector3(-_dirm.x, 0, -_dirm.y) * 0.12 * _run_t * go                     # arms trail behind when running
 		pos += Vector3(side * -0.06 * _run_t * go, 0.10 * _run_t * go * absf(arm), 0)  # elbows in and up: pumping
 		pos += Vector3(side * 0.22, 0.14, 0.0) * _slide                                # sliding: arms out for balance
 		if _swim > 0.01:                                                               # swimming: the arms reach forward and pull back in turns
 			var a := _swim_t + PI * i
-			pos = pos.lerp(_rest[h] + Vector3(side * 0.10, -0.04 + 0.14 * sin(a), -0.30 + 0.34 * cos(a)), _swim)
-		if i == 1 and rig != null and _swim < 0.5:
+			var samp := 0.35 + 0.65 * _mv
+			var stroke: Vector3 = _rest[h] + Vector3(side * 0.10, -0.04 + 0.14 * sin(a) * samp, -0.30 + 0.34 * cos(a) * samp)
+			var scull: Vector3 = _rest[h] + Vector3(side * (0.10 + 0.10 * sin(a * 0.5)), -0.08 + 0.04 * cos(a), -0.05 + 0.10 * cos(a * 0.5))   # still: the hands sweep out and in at the waterline
+			pos = pos.lerp(stroke.lerp(scull, 1.0 - _mv), _swim)
+		if _fly > 0.01:                                                                # cruising: the right fist punches ahead, the left rests at the hip
+			var axis := Basis(Vector3.RIGHT, _body.rotation.x)
+			var fist_air: Vector3 = Vector3(0.32, 0.80, 0.0) if i == 1 else Vector3(-0.50, -0.10, 0.12)
+			var fist_wet: Vector3 = Vector3(0.09 * side, 0.82, 0.0)                    # under water both hands go together out in front, like a diver
+			var fist: Vector3 = _body.position + axis * fist_air.lerp(fist_wet, _wet)
+			if i == 1:
+				_fist1 = fist
+			pos = pos.lerp(fist, _pose_w())
+		if i == 1 and rig != null:
 			var grip: Variant = rig.grip_world()                                       # the right hand holds the tool
 			if grip != null:
 				h.position = h.position.lerp(_model.to_local(grip), 1.0 - exp(-delta * 30.0))
@@ -317,6 +423,95 @@ static func _flat(v: Vector3, up: Vector3, fallback: Vector3) -> Vector3:
 	var f := v - up * v.dot(up)
 	return f.normalized() if f.length() > 0.001 else fallback
 
+## The cape: a small red sheet hung from the shoulders that streams back along the flight path and ripples. Only drawn while flying.
+func _animate_cape() -> void:
+	if _cape == null:
+		return
+	_cape.visible = _fly * (1.0 - _wet) > 0.02                      # no cape under water
+	if not _cape.visible:
+		return
+	var vl := global_transform.basis.inverse() * ball.linear_velocity
+	var vdir := vl.normalized() if vl.length() > 0.5 else Vector3.ZERO
+	var s := minf(_fly_s, 1.0)
+	var dir := (-vdir * s * 1.2 + Vector3(0, -1.0, 0.15) * (1.1 - 0.8 * s)).normalized()
+	var axis := Basis(Vector3.RIGHT, _body.rotation.x)
+	var length := 0.9 * _fly * (1.0 - _wet) * (1.0 + 0.5 * minf(_fly_s, 1.3))
+	const ROWS := 6
+	const COLS := 4
+	var grid: Array = []
+	for j in ROWS:
+		var t := float(j) / (ROWS - 1)
+		for i in COLS:
+			var u := lerpf(-1.0, 1.0, float(i) / (COLS - 1))
+			var base := _body.position + axis * Vector3(u * 0.24, 0.20, 0.36 - 0.03 * u * u)
+			var wave := Vector3(sin(_t * 12.0 - t * 6.0 + u * 2.0) * 0.5, sin(_t * 15.0 - t * 5.0) * 0.8, cos(_t * 10.0 - t * 5.0) * 0.4)
+			grid.append(base + Vector3.RIGHT * u * 0.28 * t + dir * length * t + wave * 0.07 * t * (0.3 + s))
+	_cape_mesh.clear_surfaces()
+	_cape_mesh.surface_begin(Mesh.PRIMITIVE_TRIANGLES)
+	for j in ROWS - 1:
+		for i in COLS - 1:
+			var a: Vector3 = grid[j * COLS + i]
+			var b: Vector3 = grid[j * COLS + i + 1]
+			var c: Vector3 = grid[(j + 1) * COLS + i]
+			var d: Vector3 = grid[(j + 1) * COLS + i + 1]
+			for tri: Array in [[a, c, b], [b, c, d]]:
+				var n: Vector3 = ((tri[1] - tri[0]) as Vector3).cross(tri[2] - tri[0]).normalized()
+				for pt: Vector3 in tri:
+					_cape_mesh.surface_set_normal(n)
+					_cape_mesh.surface_add_vertex(pt)
+	_cape_mesh.surface_end()
+
+## Flight effects: a glowing trail from the boots, white wind streaks rushing past (more and longer the faster he goes), gold when boosting.
+func _emit_fly_fx(delta: float, up: Vector3) -> void:
+	var v := ball.linear_velocity
+	var spd := v.length()
+	# crossing the surface (in or out) throws a splash, and low over the water he leaves a wake of foam
+	var sub := ball.world.submersion(ball.global_position)
+	var in_w := sub > -1.0e8 and sub > 0.0
+	if in_w != _was_in_w and sub > -1.0e8:
+		fx.splash(ball.global_position + up * sub, v * 0.12, up, int(12.0 + spd * 0.5), 0.14)
+		(ball.world.water as WaterSystem).add_ripple(ball.global_position + up * sub, clampf(1.0 + spd / 20.0, 1.0, 2.5))
+	_was_in_w = in_w
+	if sub > -1.0e8 and absf(sub) < 1.5 and spd > 4.0:
+		_acc_frip += delta
+		if _acc_frip > 0.2:
+			_acc_frip = 0.0
+			(ball.world.water as WaterSystem).add_ripple(ball.global_position + up * sub, 0.5)
+		_acc_foam += delta * 20.0
+		while _acc_foam >= 1.0:
+			_acc_foam -= 1.0
+			fx.foam(ball.global_position + up * sub - v.normalized() * 0.4, up, 0.34)
+	if _wet > 0.5:
+		_acc_trail += delta * (14.0 + spd * 0.8)                              # under water: bubbles from the boots and the hands, no glow and no wind
+		while _acc_trail >= 1.0:
+			_acc_trail -= 1.0
+			var src: Node3D = (_feet + _hands)[randi() % 4]
+			fx.bubble(src.global_position, -v * 0.1, 0.05 + randf() * 0.05)
+		return
+	if spd < 3.0:
+		return
+	var dir := v / spd
+	var boost := clampf((spd - BallPlayer.FLY_SPEED) / (BallPlayer.FLY_BOOST - BallPlayer.FLY_SPEED), 0.0, 1.0)
+	var glow := Color(0.65, 0.9, 1.0, 0.6).lerp(Color(1.0, 0.8, 0.35, 0.75), boost)
+	_acc_trail += delta * (30.0 + 40.0 * boost)
+	while _acc_trail >= 1.0:
+		_acc_trail -= 1.0
+		for i in 2:
+			fx.glow((_feet[i] as Node3D).global_position, -dir * 1.5, 0.20 + 0.18 * boost, glow)
+	_acc_wind += delta * clampf(spd * 1.4, 0.0, 90.0)
+	var p := ball.global_position
+	var side := dir.cross(up)
+	if side.length() < 0.01:
+		side = dir.cross(Vector3.RIGHT)
+	side = side.normalized()
+	var other := dir.cross(side).normalized()
+	while _acc_wind >= 1.0:
+		_acc_wind -= 1.0
+		var ang := randf() * TAU
+		var rad := randf_range(1.2, 3.5)
+		var at := p + dir * randf_range(-2.0, 6.0) + (side * cos(ang) + other * sin(ang)) * rad
+		fx.streak(at, dir, 2.0 + spd * 0.12, 0.05, Color(1, 1, 1, 0.45))
+
 ## Dust where a boot lands, behind a run, along a slide; spray and foam on the water. All of it is display (PlayerFx).
 func _emit_fx(delta: float, up: Vector3, vt: Vector3, swimming: bool) -> void:
 	if fx == null or ball.world == null:
@@ -332,7 +527,7 @@ func _emit_fx(delta: float, up: Vector3, vt: Vector3, swimming: bool) -> void:
 		for i in 2:
 			var c := cos(_phase + PI * i)
 			var foot := (_feet[i] as Node3D).global_position
-			if _prev_c[i] > 0.0 and c <= 0.0 and go > 0.35 and not ball.sliding:
+			if _prev_c[i] > 0.0 and c <= 0.0 and go > 0.35 and not ball.sliding and not ball.fly:
 				var n := 1 + (2 if _run_t > 0.5 else 0)
 				fx.dust(foot, back * _speed * 0.35, up, _ground_col, n, 0.20 + 0.12 * _run_t)
 			_prev_c[i] = c
@@ -346,19 +541,61 @@ func _emit_fx(delta: float, up: Vector3, vt: Vector3, swimming: bool) -> void:
 			for i in 2:
 				fx.dust((_feet[i] as Node3D).global_position, Vector3.ZERO, up, _ground_col, 4, 0.32)
 	_landed = false
+	if ball.fly:
+		_emit_fly_fx(delta, up)
 	if swimming:
 		var sub := ball.world.submersion(p)
 		if sub > -1.0e8:
 			var surface := p + up * sub
+			var water: WaterSystem = ball.world.water
+			var spd3 := ball.linear_velocity.length()
 			if not _was_swim:
 				fx.splash(surface, Vector3.ZERO, up, 16, 0.12)                     # in with a splash
-			_acc_foam += delta * (1.5 + _speed * 2.5)
-			while _acc_foam >= 1.0:
-				_acc_foam -= 1.0
-				fx.foam(surface + back * 0.4, up, 0.30)
-				if _speed > 0.8:
-					fx.splash(surface + back * 0.3, back * 0.6, up, 2, 0.09)       # the strokes throw drops
+				water.add_ripple(surface, clampf(1.0 + spd3 / 15.0, 1.0, 2.5))     # ... and a ring spreads
+			_acc_rip += delta
+			if sub < 1.5:
+				var iv := 0.25 if spd3 > 0.5 else 1.3
+				if _acc_rip > iv:
+					_acc_rip = 0.0
+					if spd3 > 0.5:                                                  # a wake: two rings either side of the body, a V behind him
+						var sd := global_transform.basis.x * 0.5
+						var st := (0.9 + spd3 * 0.15) * (1.0 if ball.swim_state == BallPlayer.SwimState.SURFACE else 0.5)
+						water.add_ripple(surface + sd, st)
+						water.add_ripple(surface - sd, st)
+					else:
+						water.add_ripple(surface, 0.55)                             # floating still: a slow ring now and then (the bob)
+			if sub < 0.8:                                                           # (only while he is at the surface: foam puffs over a deep diver were a stray blob)
+				_acc_foam += delta * (0.6 + _speed * 1.2)
+				while _acc_foam >= 1.0:
+					_acc_foam -= 1.0
+					if _speed > 0.8:
+						fx.splash(surface + back * 0.3, back * 0.6, up, 2, 0.09)       # the strokes throw drops
+	if _was_swim and not swimming and not ball.fly:
+		var sub2 := ball.world.submersion(p)
+		if sub2 > -1.0e8:
+			(ball.world.water as WaterSystem).add_ripple(p + up * sub2, 0.6)         # out of the water: a ring
 	_was_swim = swimming
+	_update_ring(delta, p, up)
+
+## The soft ring on the water round a floating swimmer.
+func _update_ring(delta: float, p: Vector3, up: Vector3) -> void:
+	var show := ball.swim_state == BallPlayer.SwimState.SURFACE and not ball.fly
+	_ring_a = lerpf(_ring_a, 1.0 if show else 0.0, 1.0 - exp(-delta * 6.0))
+	_ring.visible = _ring_a > 0.02
+	if not _ring.visible:
+		return
+	var sub := ball.world.submersion(p)
+	if sub < -1.0e8:
+		_ring.visible = false
+		return
+	var x := up.cross(Vector3.RIGHT)
+	if x.length() < 0.01:
+		x = up.cross(Vector3.FORWARD)
+	x = x.normalized()
+	var y := up.cross(x)
+	var sc := 1.0 + 0.06 * sin(_t * 2.2)
+	_ring.global_transform = Transform3D(Basis(x * sc, y * sc, up), p + up * (sub + 0.03))
+	(_ring.material_override as ShaderMaterial).set_shader_parameter("alpha", 0.30 * _ring_a * (1.0 - 0.6 * _mv))
 
 ## The ground colour under a point (the surface colour of the terrain there), for the dust.
 func _sample_ground(p: Vector3) -> Color:
