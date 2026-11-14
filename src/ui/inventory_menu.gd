@@ -5,6 +5,7 @@ extends Control
 ## on the cursor, which is handed back when the screen closes.
 
 signal message(text: String, color: Color)
+signal closed                          # the X was pressed: whoever owns the screen closes it
 
 var _kit: PlayerKit
 var _grid: GridContainer
@@ -36,7 +37,18 @@ func _init() -> void:
 	var left := VBoxContainer.new()
 	left.add_theme_constant_override("separation", 8)
 	row.add_child(left)
-	left.add_child(_title("Inventory   (Tab / I / Esc to close)"))
+	var head := HBoxContainer.new()
+	left.add_child(head)
+	var t := _title("Inventory   (Tab / I / Esc to close)")
+	t.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	head.add_child(t)
+	var x := Button.new()                                        # the close icon
+	x.text = "X"
+	x.tooltip_text = "Close"
+	x.focus_mode = Control.FOCUS_NONE
+	x.custom_minimum_size = Vector2(32, 28)
+	x.pressed.connect(func() -> void: closed.emit())
+	head.add_child(x)
 	_grid = GridContainer.new()
 	_grid.columns = InventoryBar.COLUMNS
 	_grid.add_theme_constant_override("h_separation", int(UiTheme.GAP))

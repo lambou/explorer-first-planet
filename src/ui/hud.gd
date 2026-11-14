@@ -17,6 +17,7 @@ var tool_bar: ToolBar
 var inventory_bar: InventoryBar
 var menu: InventoryMenu
 var toasts: ToastFeed
+var gear: GearWheel
 var _kit: PlayerKit
 
 func _ready() -> void:
@@ -56,6 +57,9 @@ func _ready() -> void:
 	menu = InventoryMenu.new()
 	add_child(menu)
 	menu.message.connect(toasts.push)
+	menu.closed.connect(func() -> void: set_menu_open(false))
+	gear = GearWheel.new()
+	add_child(gear)
 
 ## Show this kit. Call once, after the Hud is in the tree.
 func bind(kit: PlayerKit) -> void:
@@ -63,10 +67,12 @@ func bind(kit: PlayerKit) -> void:
 	tool_bar.bind(kit.belt)
 	inventory_bar.bind(kit)
 	menu.bind(kit)
+	gear.bind(kit.belt)
+	gear.picked.connect(func(i: int) -> void: kit.belt.select(i))
 	kit.harvester.gathered.connect(_on_gathered)
 	kit.torch_burnt_out.connect(func() -> void: toasts.push("Your torch burnt out", UiTheme.WARN))
 	kit.belt.selected.connect(func(id: String) -> void: toasts.push(ToolCatalog.get_def(id).name))
-	toasts.push("[Tab]/[I] inventory and crafting   [Q] next tool   [T] plant a torch   [E] pick it up   [F3] info   [Esc] mouse")
+	toasts.push("[Tab]/[I] inventory and crafting   [Q] next tool   hold [G] gear wheel   [T] plant a torch   [E] pick it up   [F3] info   [Esc] mouse")
 
 func toggle_info() -> void:
 	_label.visible = not _label.visible
@@ -83,7 +89,7 @@ func say(text: String, color: Color = UiTheme.TEXT) -> void:
 	toasts.push(text, color)
 
 func menu_open() -> bool:
-	return menu.visible
+	return menu.visible or gear.visible
 
 func set_menu_open(open: bool) -> void:
 	if open == menu.visible:
@@ -105,16 +111,26 @@ func _on_gathered(item_id: String, added: int, wanted: int) -> void:
 
 ## `_input`, not `_unhandled_input`: the UI's own focus handling (Tab walks the buttons) must never swallow these keys.
 func _input(event: InputEvent) -> void:
+	if enabled and _kit != null and event is InputEventKey and event.physical_keycode == KEY_G and not event.echo:
+		if event.pressed and not menu.visible and not gear.visible:
+			gear.open()                                     # hold [G]: the gear wheel, release on a tool to equip it
+		elif not event.pressed and gear.visible:
+			gear.close(true)
+		return
 	if not enabled or _kit == null or not (event is InputEventKey) or not event.pressed or event.echo:
 		return
 	match event.physical_keycode:
 		KEY_F3:
 			toggle_info()
 		KEY_TAB, KEY_I:
-			set_menu_open(not menu.visible)
+			if not gear.visible:
+				set_menu_open(not menu.visible)
 			get_viewport().set_input_as_handled()
 		KEY_ESCAPE:
-			if menu.visible:
+			if gear.visible:
+				gear.close(false)
+				get_viewport().set_input_as_handled()
+			elif menu.visible:
 				set_menu_open(false)
 				get_viewport().set_input_as_handled()
 		KEY_Q:
